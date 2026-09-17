@@ -28,9 +28,11 @@ wandb/
 # ==========================================
 # 3. Machine Learning Models (Don't upload heavy trained weights)
 # ==========================================
-*.pth      # PyTorch models
+# PyTorch models
+*.pth
 *.pt
-*.h5       # TensorFlow/Keras models
+# TensorFlow/Keras models
+*.h5
 *.keras
 generated/
 training_saver/
@@ -47,5 +49,36 @@ __pycache__/
 .DS_Store
 Thumbs.db
 .vscode/
-.idea/*.e[0-9]*
+.idea/
+
+# ==========================================
+# 7. PBS job logs & old runs
+# ==========================================
+*.e[0-9]*
 *.o[0-9]*
+.old_runs/
+
+# ==========================================
+# 8. Experiment outputs (checkpoints, scores, caches)
+# ==========================================
+*_out/
+*_out_*/
+*_mmtest/
+*_mmval/
+*_recheck/
+adapter_out*/
+sup_cache_*/
+sup_probe_*/
+derisk_out*/
+derisk_smoke/
+bn_tta_out/
+gan_vendor_out/
+embedding_maps/
+presentation_lv_wall/
+
+# ==========================================
+# 9. Local-only documents / reference material
+# ==========================================
+thesis/
+q-former/
+multitask MAD/
