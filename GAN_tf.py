@@ -249,7 +249,8 @@ def Discriminator(frame_true, flow_hat, is_training, reuse=False, return_middle_
 def train_Unet_naive_with_batch_norm(training_images, training_flows, max_epoch, dataset_name='', start_model_idx=0, batch_size=16,
                                      val_images=None, val_flows=None, val_labels=None,
                                      val_pids=None, val_slice_idxs=None, val_dataset_ids=None,
-                                     lw_adv=0.25, lw_appe=1.0, lw_aux=2.0):
+                                     lw_adv=0.25, lw_appe=1.0, lw_aux=2.0,
+                                     lw_ssim=0.0, ssim_max_val=None):
     wandb.init(
         project="mres-ICCV2019",
         name=f"{dataset_name}_flow_e{start_model_idx}-{max_epoch}",
@@ -263,6 +264,8 @@ def train_Unet_naive_with_batch_norm(training_images, training_flows, max_epoch,
             "lw_adv":  lw_adv,
             "lw_appe": lw_appe,
             "lw_aux":  lw_aux,
+            "lw_ssim": lw_ssim,
+            "ssim_max_val": ssim_max_val,
             "optimizer": "Adam",
             "learning_rate_D": 0.00002,
             "learning_rate_G": 0.0002
@@ -305,6 +308,27 @@ def train_Unet_naive_with_batch_norm(training_images, training_flows, max_epoch,
     # optical loss
     loss_opt = tf.reduce_mean(tf.abs(output_opt - plh_flow_true))
 
+    # SSIM loss on flow — aligns training with the flow__SSIM validation score
+    # (utils.compute_flow_ssim_scores). v2 extension: separate magnitude-channel
+    # term on output_opt[..., -1:] to target the mag__SSIM stream directly.
+    if lw_ssim > 0:
+        if ssim_max_val is not None:
+            ssim_range = tf.constant(float(ssim_max_val), dtype=tf.float32)
+        else:
+            # Per-batch dynamic range, mirroring eval's data_range = max - min.
+            # stop_gradient: G must not shrink the loss by inflating its own
+            # output range (C1/C2 grow with the range). Guard mirrors eval's
+            # `or 1.0` zero-range fallback.
+            _stacked = tf.concat([plh_flow_true, output_opt], axis=0)
+            ssim_range = tf.stop_gradient(
+                tf.reduce_max(_stacked) - tf.reduce_min(_stacked))
+            ssim_range = tf.maximum(ssim_range, 1e-3)
+        # per-channel SSIM averaged over the 3 channels (dx, dy, mag) -> [B]
+        ps_ssim = tf.image.ssim(output_opt, plh_flow_true, max_val=ssim_range)
+        loss_ssim = 1.0 - tf.reduce_mean(ps_ssim)
+    else:
+        loss_ssim = tf.constant(0.0, name='loss_ssim_disabled')
+
     # ── Per-sample losses (for AUC computation during validation) ─────
     # Reduce over spatial dims (H, W, C) only, keep batch dim
     ps_loss_inten = tf.reduce_mean((output_appe - scaled_frame_true)**2, axis=[1, 2, 3])
@@ -323,6 +347,8 @@ def train_Unet_naive_with_batch_norm(training_images, training_flows, max_epoch,
              0.5*tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=D_fake_logits, labels=tf.zeros_like(D_fake)))
     G_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=D_fake_logits, labels=tf.ones_like(D_fake)))
     G_loss_total = lw_adv*G_loss + lw_appe*loss_appe + lw_aux*loss_opt
+    if lw_ssim > 0:
+        G_loss_total = G_loss_total + lw_ssim * loss_ssim
 
     # optimizers
     t_vars = tf.trainable_variables()
@@ -340,6 +366,8 @@ def train_Unet_naive_with_batch_norm(training_images, training_flows, max_epoch,
     tf.summary.scalar('G_loss', G_loss)
     tf.summary.scalar('appe_loss', loss_appe)
     tf.summary.scalar('opt_loss', loss_opt)
+    if lw_ssim > 0:
+        tf.summary.scalar('ssim_loss', loss_ssim)
     merge = tf.summary.merge_all()
 
     #
@@ -381,7 +409,7 @@ def train_Unet_naive_with_batch_norm(training_images, training_flows, max_epoch,
         # executive training stage
 
         # Accumulators for per-batch loss components — used by line_series charts
-        _steps, _inten, _gradi, _appe, _opt = [], [], [], [], []
+        _steps, _inten, _gradi, _appe, _opt, _ssim = [], [], [], [], [], []
         # Accumulators for per-epoch validation losses (one point per epoch)
         _val_epochs, _val_healthy_appe, _val_unhealthy_appe, _val_healthy_opt, _val_unhealthy_opt = [], [], [], [], []
         _val_disease_appe = {}   # disease_label -> [mean_appe per epoch]
@@ -398,8 +426,8 @@ def train_Unet_naive_with_batch_norm(training_images, training_flows, max_epoch,
                                                               plh_flow_true: training_flows[batch_idx[j]],
                                                               plh_is_training: True})
                 if j % 50 == 0:
-                    _, curr_G_loss, curr_loss_appe, curr_loss_inten, curr_loss_gradi, curr_loss_opt, curr_gen_frames, curr_gen_flows, summary = \
-                                    sess.run([G_optimizer, G_loss, loss_appe, loss_inten, loss_gradi, loss_opt, output_appe[:4], output_opt[:4], merge],
+                    _, curr_G_loss, curr_loss_appe, curr_loss_inten, curr_loss_gradi, curr_loss_opt, curr_gen_frames, curr_gen_flows, curr_loss_ssim, summary = \
+                                    sess.run([G_optimizer, G_loss, loss_appe, loss_inten, loss_gradi, loss_opt, output_appe[:4], output_opt[:4], loss_ssim, merge],
                                              feed_dict={plh_frame_true: training_images[batch_idx[j]],
                                                         plh_flow_true: training_flows[batch_idx[j]],
                                                         plh_is_training: True,
@@ -409,8 +437,8 @@ def train_Unet_naive_with_batch_norm(training_images, training_flows, max_epoch,
                                   curr_gen_flows, curr_gen_frames, i, j)
 
                 else:
-                    _, curr_G_loss, curr_loss_appe, curr_loss_inten, curr_loss_gradi, curr_loss_opt, summary = \
-                                    sess.run([G_optimizer, G_loss, loss_appe, loss_inten, loss_gradi, loss_opt, merge],
+                    _, curr_G_loss, curr_loss_appe, curr_loss_inten, curr_loss_gradi, curr_loss_opt, curr_loss_ssim, summary = \
+                                    sess.run([G_optimizer, G_loss, loss_appe, loss_inten, loss_gradi, loss_opt, loss_ssim, merge],
                                              feed_dict={plh_frame_true: training_images[batch_idx[j]],
                                                         plh_flow_true: training_flows[batch_idx[j]],
                                                         plh_is_training: True,
@@ -428,8 +456,9 @@ def train_Unet_naive_with_batch_norm(training_images, training_flows, max_epoch,
                 _gradi.append(float(curr_loss_gradi))
                 _appe.append(float(curr_loss_appe))
                 _opt.append(float(curr_loss_opt))
+                _ssim.append(float(curr_loss_ssim))
 
-                wandb.log({
+                train_log = {
                     "Epoch":                    i + 1,
                     "Discriminator_Loss":       curr_D_loss,
                     "Generator_Loss":           curr_G_loss,
@@ -437,8 +466,11 @@ def train_Unet_naive_with_batch_norm(training_images, training_flows, max_epoch,
                     "Appearance/Gradient":      curr_loss_gradi,
                     "Appearance/Total":         curr_loss_appe,
                     "Flow/Total":               curr_loss_opt,
-                }, step=global_step)
-                if np.isnan(curr_D_loss) or np.isnan(curr_G_loss) or np.isnan(curr_loss_appe) or np.isnan(curr_loss_opt):
+                }
+                if lw_ssim > 0:
+                    train_log["Flow/SSIM_Loss"] = curr_loss_ssim
+                wandb.log(train_log, step=global_step)
+                if np.isnan(curr_D_loss) or np.isnan(curr_G_loss) or np.isnan(curr_loss_appe) or np.isnan(curr_loss_opt) or np.isnan(curr_loss_ssim):
                     return
                 losses = np.concatenate((losses, [[curr_D_loss, curr_G_loss, curr_loss_appe, curr_loss_opt]]), axis=0)
             # Save checkpoint after every completed epoch
@@ -458,8 +490,8 @@ def train_Unet_naive_with_batch_norm(training_images, training_flows, max_epoch,
                 ),
                 "charts/Flow_Loss": _wandb_line_series(
                     xs=_steps,
-                    ys=[_opt],
-                    keys=["Flow L1"],
+                    ys=[_opt] + ([_ssim] if lw_ssim > 0 else []),
+                    keys=["Flow L1"] + (["Flow SSIM (1-SSIM)"] if lw_ssim > 0 else []),
                     title="Optical Flow Loss",
                     xname="Global Step"
                 ),

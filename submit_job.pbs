@@ -55,7 +55,7 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 # Run your Python training script
 # Note: Ensure the paths (--acdc_dir, --mm_dir, --mm_csv) perfectly match where 
 # you placed them in your ephemeral storage relative to this script.
-VERSION="registration_ed_es"
+VERSION="registration_es_ed"
 
 # IMPORTANT: --orient_normalize requires
 #   ../reconstructed_sax_images_training_2023/segmentation/orientation_params.csv
@@ -82,7 +82,7 @@ python run_model.py \
     --aux_source registration \
     --reg_repo ../biomechanics-cardiac-motion-hpc \
     --datasets ACDC MM \
-    --frame_mode ed_es \
+    --frame_mode es_ed \
     --acdc_dir ../Dataset_2 \
     --mm_dir ../Dataset_1/Training \
     --mm_val_dir ../Dataset_1/Validation \

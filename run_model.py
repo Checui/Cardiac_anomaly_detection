@@ -118,6 +118,12 @@ if __name__ == "__main__":
                         help='Loss weight for the appearance reconstruction term.')
     parser.add_argument('--lw_aux',  type=float, default=2.0,
                         help='Loss weight for the auxiliary prediction term (flow or ED).')
+    parser.add_argument('--lw_ssim', type=float, default=0.0,
+                        help='Loss weight for the SSIM term on the flow head '
+                             '(0 = disabled, identical to previous behaviour). Flow model only.')
+    parser.add_argument('--ssim_max_val', type=float, default=None,
+                        help='Fixed data range for the SSIM loss. Default None = '
+                             'per-batch dynamic range (mirrors the eval data_range).')
 
     # ── Orientation normalisation ─────────────────────────────────────────────
     parser.add_argument('--orient_normalize', action='store_true',
@@ -231,6 +237,9 @@ if __name__ == "__main__":
         if args.model_type == 'rgb' and args.aux_source == 'registration':
             print("[run_model] NOTE: --aux_source registration is ignored for "
                   "--model_type rgb (future-frame prediction).")
+    if args.model_type == 'rgb' and args.lw_ssim > 0:
+        print("[run_model] NOTE: --lw_ssim is ignored for --model_type rgb "
+              "(SSIM loss is implemented for the flow head only).")
 
     # ------------------------------------------------------------------
     # 1. Build per-dataset loader dispatch tables
@@ -306,6 +315,8 @@ if __name__ == "__main__":
     dataset_name = '_'.join(args.datasets) + '_' + args.frame_mode.upper() + '_' + args.model_type.upper() + '_NOR'
     if args.model_type == 'flow' and args.aux_source == 'registration':
         dataset_name = dataset_name + '_REG'   # keep registration runs in a separate checkpoint folder
+    if args.model_type == 'flow' and args.lw_ssim > 0:
+        dataset_name = dataset_name + '_SSIM'  # keep SSIM-loss runs in a separate checkpoint folder
     if args.run_tag:
         dataset_name = dataset_name + '_' + args.run_tag
     print(f"\nTotal training samples: {len(train_part1)}")
@@ -427,6 +438,8 @@ if __name__ == "__main__":
             lw_adv=args.lw_adv,
             lw_appe=args.lw_appe,
             lw_aux=args.lw_aux,
+            lw_ssim=args.lw_ssim,
+            ssim_max_val=args.ssim_max_val,
         )
     else:
         GAN_tf_rgb.train_Unet_naive_with_batch_norm(
