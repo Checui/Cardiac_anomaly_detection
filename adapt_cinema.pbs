@@ -1,0 +1,57 @@
+#!/bin/bash
+
+# =============================================================================
+# Phase 1 of Option A: train a NOR-only LoRA adapter for CineMA via continued
+# MAE pretraining (adapt_cinema.py). Goal: close the M&Ms domain gap the frozen
+# de-risk exposed (ACDC 0.76 vs M&Ms 0.59), label-free. Output adapter ->
+# adapter_out/cinema_lora.pt, then re-run derisk_cinema.py --adapter_path.
+# See MAE_CineMA_feasibility_memo.md and the plan.
+# =============================================================================
+
+#PBS -N Adapt_CineMA_v3
+#PBS -l walltime=08:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+echo "--- Training NOR-only LoRA adapter (continued MAE pretraining) ---"
+
+# v3 config (after gates #1/#2: v2's low-rank setup lifted ACDC 0.76->0.79 but M&Ms
+# stayed flat, and v1==v2 feature shift => DATA, not config, was the limit). Same v2
+# LoRA setup (encoder+decoder LoRA, frozen base decoder, rank 16, lr 3e-4) but now
+# --all_frames: train on the WHOLE cine (~1500 NOR stacks vs 116, ~13x). Fewer epochs
+# (40) since each epoch sees far more data. Decisive test of the data-limit hypothesis.
+# Fresh out dir; v2's ./adapter_out_v2 preserved.
+python adapt_cinema.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --fit_datasets ACDC MM \
+    --all_frames \
+    --rank 16 \
+    --alpha 32 \
+    --lora_prefix encoder. decoder. \
+    --no_train_decoder \
+    --epochs 40 \
+    --batch_size 4 \
+    --lr 3e-4 \
+    --warmup_epochs 4 \
+    --mask_ratio 0.75 \
+    --out_dir ./adapter_out_v3
+
+echo "--- Finished ---"
+echo "Job finished on $(date)"
+echo "Adapter: ./adapter_out_v3/cinema_lora.pt   (next: qsub derisk with --adapter_path)"

@@ -57,6 +57,61 @@ The *temporal masked-AE idea* is right for cine data, but **VideoMAE is pretrain
 
 A one-afternoon check that needs no changes to the GAN: load frozen CineMA (HF weights), run the **existing NOR + disease val frames** through its SAX encoder, and test whether a simple normal-feature model already separates disease — e.g. **PatchCore/Mahalanobis distance on the frozen features** (no student training required). Score with the current patient-level aggregators and compare AUC to the Flow-SSIM baseline (~0.73–0.77). If frozen CineMA features separate disease at all, the full reverse-distillation build is justified; if they don't, that's a strong early signal to reconsider the backbone or add encoder adaptation.
 
+## Implementation & where it runs — **HPC always**
+
+> **All CineMA / MAE experiments for this project run on the Imperial College HPC (PBS), not locally.** Datasets, cached model weights, and the conda env all live on the HPC. Submit with `qsub`; the login node is contended, so do not run training/feature extraction there (short read-only checks only).
+
+The de-risking experiment above is **implemented** (built out from the "one-afternoon check"):
+
+- **Submit:** `qsub derisk_cinema.pbs` from the repo root → batch job on a GPU compute node → results in `derisk_out/derisk_results.json` (+ `derisk_arrays.npz`, and the PBS `Derisk_CineMA.o<jobid>` / `.e<jobid>` logs).
+- **Code:** `derisk_cinema.py` (entry point; `--cinema_preproc faithful|legacy`, Mahalanobis + kNN on frozen features), `cinema_faithful.py` (CineMA-canonical SAX preprocessing: resample 1 mm → LV-bbox crop 192² → clip 0.95/99.5 → real depth-16 stacks), `derisk_cinema.pbs` (submission script).
+- **Env:** conda env `derisk` — torch + editable `cinema` (from `~/CineMA`) + monai / scikit-learn / scikit-image / SimpleITK / nibabel / opencv. CineMA weights are cached **offline** at `$EPHEMERAL/hf_cache` (the PBS job runs with `HF_HUB_OFFLINE=1`); pre-download once on the login node if the cache is ever cleared.
+- **Faithful vs legacy:** `faithful` (default) reads raw ACDC/M&Ms via CineMA's own pipeline (on-distribution); `legacy` uses the ICCV `data_loader.py` single-2D-slice path (honours `--orient/--spacing/--n4`). The faithful path scores per 3-D stack (one per patient×phase) and aggregates to patient by Mean/Max.
+
+## Results & findings (experiments, 2026-07)
+
+The de-risk was built out and run on the HPC (frozen-feature probe: Mahalanobis /
+Ledoit-Wolf + kNN on NOR-only CineMA features, scored NOR-vs-disease, patient-level).
+All AUCs below are **patient-level Mean, Mahalanobis** (the strongest scorer; kNN was
+uniformly weaker).
+
+| Configuration | Overall | ACDC | M&Ms |
+|---|---|---|---|
+| Frozen CineMA, **faithful** canonical-SAX preprocessing | 0.68 | **0.76** | 0.59 |
+| Frozen CineMA, legacy single-2D-slice preprocessing | 0.59 | 0.62 | 0.51 |
+| **NOR-only LoRA adapter** (continued MAE pretrain, best of 2 configs) | 0.68 | **0.79** | 0.58 |
+| Flow-SSIM motion GAN baseline (current pipeline) | **0.73–0.77** | — | — |
+
+**Findings:**
+1. **Frozen CineMA carries real in-distribution disease signal.** On ACDC it reaches
+   0.76 with no decoder training — matching the Flow-SSIM baseline — confirming the memo's
+   central hypothesis for single-centre data.
+2. **Reading it on-distribution is essential.** CineMA's own canonical SAX pipeline
+   (resample 1 mm → LV-bbox crop 192² → clip → real depth-16 stacks) beats a crude
+   single-2D-slice feed by **+0.145 AUC on ACDC** (0.76 vs 0.62), even though the crude
+   path had ~3× more samples. Input geometry, not data volume, was the lever.
+3. **The M&Ms multi-vendor domain gap is genuine and robust.** M&Ms sits at ~0.59 and is
+   *not* a preprocessing bug (LV labels/crops verified). It is closed by **neither**
+   feature-config/PCA tuning **nor** light NOR-only MAE adaptation. A LoRA adapter across
+   **three** configurations — minimal; constrained-decoder + stronger LoRA; and **all-cine-
+   frames (~13× the NOR data)** — consistently *sharpened ACDC to ~0.79* (above baseline)
+   while M&Ms stayed flat (ACDC/M&Ms ΔAUC: +0.006/+0.003, +0.032/−0.009, +0.032/−0.000).
+   So the gap is not a decoder-capacity, learning-rate, or **data-volume** problem: light
+   self-supervised normal-only adaptation reliably helps the single-centre set and simply
+   does not transfer to the multi-vendor one.
+4. **Overall, the frozen/adapted CineMA probe (~0.68) does not beat the Flow-SSIM GAN
+   (0.73–0.77) on the combined ACDC+M&Ms benchmark** — the M&Ms gap holds it back. CineMA
+   wins in-distribution (ACDC) but not across domains.
+
+**Conclusion.** CineMA is a strong *in-distribution* cardiac anomaly detector as a frozen,
+normal-only feature extractor, and the canonical-SAX pipeline is what unlocks it. But in
+this label-free regime it does not surpass the existing motion-based GAN on the
+multi-vendor benchmark, because light self-supervised adaptation cannot cross the M&Ms
+domain gap. Closing that gap would require either **more adaptation data** (all cardiac
+phases, ~10× more NOR stacks — untried) or **stronger/supervised adaptation** (leaving the
+strict normal-only regime). Artefacts on the HPC: `derisk_out/` (frozen),
+`derisk_out_legacy/`, `derisk_out_adapted_v2/` (adapted); adapter in `adapter_out_v2/`.
+
 ## Sources
 
 - CineMA: https://arxiv.org/abs/2506.00679 · https://github.com/mathpluscode/CineMA · https://huggingface.co/mathpluscode/CineMA · https://www.nature.com/articles/s43856-026-01636-0

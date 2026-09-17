@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# =============================================================================
+# PIXEL SCORE-WAY SWEEP — re-score the two pixel-trained QFAE models (MAE@224,
+# DINOv2@224) with MULTIPLE pixel anomaly measures on the SAME reconstruction:
+# MSE, MAE(L1), 1-SSIM, MSE+grad (the training-loss score). Scoring-only, NO
+# retraining. Mirrors the GAN notebook's multi-measure appearance sweep.
+# Evals on ACDC-50 + M&Ms-TEST and ACDC-50 + M&Ms-VAL (val enables honest
+# fusion-weight / recipe selection). Overwrites the existing out-dirs with a
+# SUPERSET (same appearance/flow streams + new appe_mse/mae/ssim/msegrad).
+# =============================================================================
+
+#PBS -N QFAE_PixScore
+#PBS -l walltime=02:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+RC=0
+CSV="../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+COMMON="--flow --img_size 224 --perceptual_backbone dino --appe_space pixel \
+        --acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training --val_datasets ACDC MM \
+        --top_frac 0.2 --batch_size 32"
+
+for ENC in mae224 dino224; do
+  case "${ENC}" in
+    mae224)  MODEL="vit_base_patch16_224.mae" ;;
+    dino224) MODEL="vit_base_patch14_dinov2.lvd142m" ;;
+  esac
+  echo "=== ${ENC} pixel score sweep on M&Ms-TEST ==="
+  python qfae_dino_eval.py ${COMMON} --dino_model ${MODEL} \
+    --mm_val_dir ../Dataset_1/Testing --mm_csv "${CSV}" \
+    --model_path ./qfae_pixelappe_${ENC}_out/qfae.pt \
+    --out_dir ./qfae_pixelappe_${ENC}_out_mmtest || RC=1
+  echo "=== ${ENC} pixel score sweep on M&Ms-VAL ==="
+  python qfae_dino_eval.py ${COMMON} --dino_model ${MODEL} \
+    --mm_val_dir ../Dataset_1/Validation --mm_csv "${CSV}" \
+    --model_path ./qfae_pixelappe_${ENC}_out/qfae.pt \
+    --out_dir ./qfae_pixelappe_${ENC}_out_mmval || RC=1
+done
+
+echo "--- Finished (rc=$RC) $(date) ---"
+echo "Offline: python analyze_pixscore.py"
+exit $RC

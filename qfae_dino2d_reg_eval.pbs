@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# =============================================================================
+# Eval the registration-flow 2-D models on the HELD-OUT sets: ACDC-50 +
+# M&Ms-TESTING. MUST pass --flow_backend registration so the val GT flow matches
+# training (else AUC is measured against the wrong field).
+# Chain: qsub -W depend=afterok:<train_jobid> qfae_dino2d_reg_eval.pbs
+# =============================================================================
+
+#PBS -N QFAE_RegFlow_eval
+#PBS -l walltime=02:30:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+RC=0
+CSV="../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+COMMON="--flow --flow_backend registration --reg_repo ../biomechanics-cardiac-motion-hpc \
+        --perceptual_backbone dino --acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training \
+        --mm_val_dir ../Dataset_1/Testing --val_datasets ACDC MM --top_frac 0.2 \
+        --batch_size 32 --img_size 224"
+
+for ENC in mae224 dino224; do
+  case "${ENC}" in
+    mae224)  MODEL="vit_base_patch16_224.mae" ;;
+    dino224) MODEL="vit_base_patch14_dinov2.lvd142m" ;;
+  esac
+  echo "=== eval ${ENC} REG-flow on ACDC-50 + M&Ms-TEST ==="
+  python qfae_dino_eval.py ${COMMON} --mm_csv "${CSV}" --dino_model ${MODEL} \
+    --model_path ./qfae_dino2d_${ENC}_reg_out/qfae.pt \
+    --out_dir ./qfae_dino2d_${ENC}_reg_out_mmtest || RC=1
+done
+
+echo "--- Finished (rc=$RC) $(date) ---"
+echo "Offline: python analyze_regflow.py"
+exit $RC

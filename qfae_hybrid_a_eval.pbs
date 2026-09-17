@@ -1,0 +1,31 @@
+#!/bin/bash
+# Eval Variant A (encoder=dino, scorer=cinema). Chain: qsub -W depend=afterok:<train> ...
+#PBS -N QFAE_HybridA_eval
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"; echo "node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+python qfae_hybrid_eval.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --val_datasets ACDC MM \
+    --encoder dino --scorer cinema \
+    --perceptual_layers 5 8 11 \
+    --model_path ./qfae_hybrid_a_out/qfae.pt \
+    --out_dir ./qfae_hybrid_a_out
+RC=$?
+echo "--- Finished $(date) --- RC=$RC"
+echo "Results: ./qfae_hybrid_a_out/qfae_results.json"
+exit $RC

@@ -1,0 +1,34 @@
+#!/bin/bash
+
+# =============================================================================
+# OPTION 3 — the apples-to-apples ceiling. Runs CineMA's OWN released fine-tuned
+# CVD classifiers (3 seeds each, acdc_sax + mnms_sax) on OUR exact held-out
+# patients. Inference only, no training. Weights are pre-cached in $HF_HOME.
+#   qsub cinema_finetuned_eval.pbs
+# =============================================================================
+
+#PBS -N CineMA_FT_eval
+#PBS -l walltime=02:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1          # checkpoints pre-downloaded on the login node
+
+echo "=== CineMA fine-tuned CVD classifiers on our held-out ACDC-50 + M&Ms-Testing ==="
+python cinema_finetuned_eval.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_test_dir ../Dataset_1/Testing \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --datasets ACDC MM --seeds 0 1 2 \
+    --out_json ./cinema_finetuned_heldout.json
+RC=$?
+echo "--- Finished (rc=$RC) $(date) ---  results: cinema_finetuned_heldout.json"
+exit $RC

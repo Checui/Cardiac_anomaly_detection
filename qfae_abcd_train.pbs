@@ -1,0 +1,88 @@
+#!/bin/bash
+
+# =============================================================================
+# A/B BATCH — architecture arms on the established best 2-D model (MAE@224,
+# Farneback flow, coupled scorer, ED single-pass). Every arm changes exactly ONE
+# thing against qfae_dino2d_mae224_out (flow_SSIM/mean held-out 0.812 / 0.714),
+# so each result reads as a clean delta.
+#
+#  GROUP=a  (A) THE BOTTLENECK. The Q-Former has never actually compressed
+#           anything: the decoder adds a positional embedding to the latents
+#           one-for-one, which pins n_queries to grid*grid (196 for patch16@224).
+#           --decoder_mode perceiver gives the decoder its own output queries that
+#           cross-attend to N latents, so N becomes a real bottleneck. Arms sweep
+#           N over {8,16,32,64,196}; N=196 is the CONTROL that isolates "perceiver
+#           decoder" from "compression" (same latent count, new decode path).
+#           Prediction under the QFAE hypothesis: AUC peaks at small N. The
+#           masked-motion result (0.636 -> 0.693 when masking restored the missing
+#           regulariser) is the evidence this is worth testing.
+#
+#  GROUP=b  (B) DINOMALY TRICKS (arXiv 2405.14325), one at a time on the
+#           unchanged direct decoder:
+#             drop02   noisy bottleneck, Q-Former dropout 0.01 -> 0.2
+#             linattn  elu+1 linear attention (softmax can focus => identity shortcut)
+#             hardmine back-prop through the hardest 25% of points only, in BOTH
+#                      the perceptual and the flow L1 loss
+#             dinomaly all three together
+#
+#   qsub -v GROUP=a qfae_abcd_train.pbs
+#   qsub -v GROUP=b qfae_abcd_train.pbs
+# Chain each group's eval:
+#   qsub -W depend=afterok:<jobid> -v GROUP=a qfae_abcd_eval.pbs
+# =============================================================================
+
+#PBS -N QFAE_ABCD_train
+#PBS -l walltime=12:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)  GROUP=${GROUP}"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+# Gate: the model smoke now also covers the perceiver decoder, linear attention,
+# hard mining and the ROI token mask. A failure here means do not spend the GPU.
+python qfae_dino.py || { echo "SMOKE FAILED — aborting"; exit 1; }
+python qfae_flowmetrics.py || { echo "FLOWMETRICS SMOKE FAILED — aborting"; exit 1; }
+
+RC=0
+CSV="../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+COMMON="--flow --epochs 80 --batch_size 32 --lr 1e-4 --warmup_epochs 8 --lambda_flow 2.0 \
+        --acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training --fit_datasets ACDC MM \
+        --dino_model vit_base_patch16_224.mae --img_size 224 --perceptual_backbone dino"
+
+run_arm () {   # $1 = arm name, $2.. = extra flags
+  local arm="$1"; shift
+  echo "=== train arm ${arm}: $* ==="
+  python qfae_dino_train.py ${COMMON} --mm_csv "${CSV}" "$@" \
+      --out_dir "./qfae_abcd_${arm}_out" || RC=1
+  echo "--- arm ${arm} done (rc=$RC) $(date) ---"
+}
+
+case "${GROUP}" in
+  a)
+    # patch16 @224 -> grid 14 -> 196 decoder patches. nq196 = no compression (control).
+    run_arm nq8    --decoder_mode perceiver --n_queries 8
+    run_arm nq16   --decoder_mode perceiver --n_queries 16
+    run_arm nq32   --decoder_mode perceiver --n_queries 32
+    run_arm nq64   --decoder_mode perceiver --n_queries 64
+    run_arm nq196  --decoder_mode perceiver --n_queries 196
+    ;;
+  b)
+    run_arm drop02   --qformer_dropout 0.2
+    run_arm linattn  --linear_attn
+    run_arm hardmine --hard_mine_frac 0.25
+    run_arm dinomaly --qformer_dropout 0.2 --linear_attn --hard_mine_frac 0.25
+    ;;
+  *) echo "ERROR: set -v GROUP=a|b"; exit 2 ;;
+esac
+
+echo "--- GROUP=${GROUP} finished (rc=$RC) $(date) ---"
+echo "Next: qsub -W depend=afterok:\$PBS_JOBID -v GROUP=${GROUP} qfae_abcd_eval.pbs"
+exit $RC

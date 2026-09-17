@@ -1,0 +1,43 @@
+#!/bin/bash
+
+# =============================================================================
+# One-off CPU preprocessing for the CineMA supervised fine-tune experiments.
+# Runs CineMA's own ACDC + M&Ms preprocess scripts into $EPHEMERAL/cinema_processed,
+# then make_cells.py (binary labels + LODO/control exclusion CSVs + audit).
+# The M&Ms shim tree must exist first: python make_mnms_shim.py (login node, seconds).
+#   qsub preprocess_cinema.pbs
+# =============================================================================
+
+#PBS -N CineMA_preproc
+#PBS -l walltime=01:00:00
+#PBS -l select=1:ncpus=4:mem=8gb
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+
+OUT=$EPHEMERAL/cinema_processed
+mkdir -p $OUT
+
+echo "=== ACDC preprocess ==="
+python /rds/general/user/cc4525/home/CineMA/cinema/data/acdc/preprocess.py \
+    --data_dir /rds/general/user/cc4525/home/Dataset_2/database \
+    --out_dir  $OUT/acdc || exit 1
+
+echo "=== M&Ms preprocess (via shim) ==="
+python /rds/general/user/cc4525/home/CineMA/cinema/data/mnms/preprocess.py \
+    --data_dir $EPHEMERAL/mnms_shim \
+    --out_dir  $OUT/mnms || exit 1
+
+echo "=== Cell definitions + audit ==="
+python /rds/general/user/cc4525/home/ICCV2019_github/make_cells.py || exit 1
+
+echo "=== Row counts ==="
+for f in $OUT/acdc/train_metadata.csv $OUT/acdc/test_metadata.csv \
+         $OUT/mnms/train_metadata.csv $OUT/mnms/val_metadata.csv $OUT/mnms/test_metadata.csv; do
+    echo "$f: $(($(wc -l < $f) - 1)) rows"
+done
+echo "--- Finished $(date) ---"

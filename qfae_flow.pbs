@@ -1,0 +1,57 @@
+#!/bin/bash
+
+# =============================================================================
+# Dual-stream QFAE (CineMA prior) — TRAINING with the optical-flow head.
+# Appearance (perceptual recon) + motion (Farneback flow L1), like the ICCV GAN's
+# two heads. Trains Q-Former + both decoders (CineMA frozen). See qfae_cinema.py /
+# qfae_perceptual.py / qfae_train.py and the plan.
+# =============================================================================
+
+#PBS -N QFAE_Flow
+#PBS -l walltime=12:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+echo "--- Training dual-stream QFAE (appearance + optical flow) ---"
+
+# --flow adds the flow head + L1 flow loss (lambda_flow weights it, GAN lw_aux=2.0).
+# Paired ED/ES records with per-slice Farneback GT flow. batch_size 2 (perceptual
+# backprops through frozen CineMA; two decoders). Watch appe vs flow loss balance.
+python qfae_train.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --fit_datasets ACDC MM \
+    --flow \
+    --lambda_flow 2.0 \
+    --qformer_blocks 2 \
+    --decoder_dim 512 \
+    --decoder_depth 6 \
+    --perceptual_layers 5 8 11 \
+    --epochs 120 \
+    --batch_size 2 \
+    --lr 1e-4 \
+    --warmup_epochs 10 \
+    --out_dir ./qfae_flow_out
+RC=$?
+
+echo "--- Finished (python rc=$RC) ---"
+echo "Job finished on $(date)"
+echo "Model: ./qfae_flow_out/qfae.pt   (next: qsub qfae_flow_eval.pbs)"
+# Propagate python's exit code so the eval's afterok dependency is meaningful
+# (a trailing echo would otherwise make the job exit 0 even on a python crash).
+exit $RC

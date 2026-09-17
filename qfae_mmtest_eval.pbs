@@ -1,0 +1,60 @@
+#!/bin/bash
+
+# =============================================================================
+# QFAE EVAL on the M&Ms TESTING folder (held-out report set), for apples-to-apples
+# with the GAN's honest held-out table (select on M&Ms-Validation, report on
+# ACDC(50) + M&Ms-Testing). The saved qfae_*_out arrays only cover M&Ms-Validation;
+# this scores the 136-patient M&Ms Testing folder (never seen) into a *_mmtest dir,
+# WITHOUT overwriting the Validation arrays.
+#
+# Usage (pick one checkpoint per submission):
+#   qsub -v VARIANT=flow   qfae_mmtest_eval.pbs   # Farneback dual  -> qfae_flow_out_mmtest
+#   qsub -v VARIANT=reg    qfae_mmtest_eval.pbs   # reg-flow dual   -> qfae_flow_reg_out_mmtest
+#   qsub -v VARIANT=masked qfae_mmtest_eval.pbs   # masked motion   -> qfae_masked_out_mmtest
+#   qsub -v VARIANT=appe   qfae_mmtest_eval.pbs   # appearance-only -> qfae_out_mmtest
+# ACDC is re-scored too (reproduces the existing ACDC numbers = a built-in sanity check).
+# =============================================================================
+
+#PBS -N QFAE_MMtest_eval
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)  VARIANT=${VARIANT}"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+MM_TEST="../Dataset_1/Testing"
+CSV="../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+COMMON="--acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training --mm_val_dir ${MM_TEST} \
+        --mm_csv ${CSV} --val_datasets ACDC MM --perceptual_layers 5 8 11 --top_frac 0.2 --batch_size 4"
+
+case "${VARIANT}" in
+  flow)
+    python qfae_eval.py --flow ${COMMON} \
+        --model_path ./qfae_flow_out/qfae.pt --out_dir ./qfae_flow_out_mmtest ;;
+  reg)
+    python qfae_eval.py --flow --flow_backend registration --reg_repo ../biomechanics-cardiac-motion-hpc ${COMMON} \
+        --model_path ./qfae_flow_reg_out/qfae.pt --out_dir ./qfae_flow_reg_out_mmtest ;;
+  masked)
+    python qfae_eval.py --flow --mask motion --mask_ratio 0.5 --mask_alpha 1.0 --mask_repeats 4 --mask_seed 1234 ${COMMON} \
+        --model_path ./qfae_masked_out_motion_0.5/qfae.pt --out_dir ./qfae_masked_out_mmtest ;;
+  appe)
+    python qfae_eval.py ${COMMON} \
+        --model_path ./qfae_out/qfae.pt --out_dir ./qfae_out_mmtest ;;
+  *)
+    echo "ERROR: set -v VARIANT=flow|reg|masked|appe"; exit 2 ;;
+esac
+RC=$?
+
+echo "--- Finished (rc=$RC) on $(date) ---"
+exit $RC

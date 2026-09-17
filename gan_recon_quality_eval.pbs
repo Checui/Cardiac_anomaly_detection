@@ -1,0 +1,44 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# Reconstruction-quality pass on the baseline GAN (gan_recon_quality_eval.py).
+#
+# Rescoring of the frozen baseline checkpoint
+# (ACDC_MM_RECON_ES_ED_FLOW_NOR_v2_orient_spacing_added, ep 50) on held-out
+# ACDC-50 + M&Ms-Testing (+ M&Ms-Validation), fetching the reconstruction head
+# output so SSIM / PSNR / MSE between reconstruction and input can be reported
+# per slice, patient and scanner vendor (thesis tab:gan_vendor). Sanity anchors
+# flow-SSIM 0.8125 / 0.7310 and appe 0.5325 / 0.4920 must reproduce.
+# -----------------------------------------------------------------------------
+
+#PBS -N GAN_ReconQual
+#PBS -l walltime=02:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+module load CUDA/11.8.0
+conda install -c conda-forge cudatoolkit=11.8.0 cudnn -y
+source activate mres_env
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+python gan_recon_quality_eval.py \
+    --ckpt_dir ./training_saver/ACDC_MM_RECON_ES_ED_FLOW_NOR_v2_orient_spacing_added \
+    --epoch 50 \
+    --acdc_dir ../Dataset_2 \
+    --mm_test_dir ../Dataset_1/Testing \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --orient_params ../reconstructed_sax_images_training_2023/segmentation/orientation_params.csv \
+    --batch_size 16 \
+    --crop 64 \
+    --save_recon \
+    --out_dir ./gan_recon_quality_out
+
+echo "Job finished on $(date)"

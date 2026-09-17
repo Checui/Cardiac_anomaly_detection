@@ -1,0 +1,40 @@
+#!/bin/bash
+
+# =============================================================================
+# Paper-faithful 2-D DINOv2 QFAE: DINOv2 reconstruction encoder + a SEPARATE
+# frozen MAE perceptual scorer (as in q-former/QFAE/losses.py). Tests whether
+# the earlier collapse (ACDC 0.64 / MM 0.50) was caused by scoring with the same
+# DINOv2 the decoder was trained against. See qfae_dino_train.py --perceptual_backbone.
+# =============================================================================
+
+#PBS -N QFAE_DinoMAE
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"; echo "node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+echo "=== training (DINOv2 encoder + SEPARATE MAE perceptual scorer) ==="
+python qfae_dino_train.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --fit_datasets ACDC MM \
+    --perceptual_backbone mae \
+    --perceptual_layers 5 8 11 \
+    --epochs 150 \
+    --batch_size 16 \
+    --out_dir ./qfae_dino_mae_out
+RC=$?
+
+echo "--- Finished $(date) ---  RC=$RC"
+exit $RC

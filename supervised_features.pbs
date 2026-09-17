@@ -1,0 +1,48 @@
+#!/bin/bash
+
+# =============================================================================
+# Stage 1 of the supervised ceiling probe: frozen-encoder + handcrafted features
+# for ACDC training/testing + M&Ms Training/Testing.
+#   qsub -v CFG=mae224 supervised_features.pbs
+#   qsub -v CFG=mae224,RECOVER=1 supervised_features.pbs   # + the 25 GE cases
+# =============================================================================
+
+#PBS -N Sup_Features
+#PBS -l walltime=03:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)  CFG=${CFG} RECOVER=${RECOVER}"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+case "${CFG}" in
+  dino224)   MODEL="vit_base_patch14_dinov2.lvd142m";  SIZE=224; BS=32 ;;
+  mae224)    MODEL="vit_base_patch16_224.mae";         SIZE=224; BS=32 ;;
+  dinov3224) MODEL="vit_base_patch16_dinov3.lvd1689m"; SIZE=224; BS=32 ;;
+  *) echo "ERROR: set -v CFG=mae224|dino224|dinov3224"; exit 2 ;;
+esac
+
+SUFFIX=""; EXTRA=""
+if [ "${RECOVER}" = "1" ]; then SUFFIX="_ge"; EXTRA="--recover_edes"; fi
+CACHE="./sup_cache_${CFG}${SUFFIX}"
+
+echo "=== supervised features: ${CFG} -> ${CACHE} ${EXTRA} ==="
+python supervised_features.py \
+    --encoder "${MODEL}" --img_size ${SIZE} --batch_size ${BS} \
+    --acdc_dir ../Dataset_2 \
+    --mm_train_dir ../Dataset_1/Training \
+    --mm_test_dir ../Dataset_1/Testing \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --ref_npz ./qfae_dino2d_mae224_out_mmtest/qfae_dino_arrays.npz \
+    --cache_dir "${CACHE}" ${EXTRA}
+RC=$?
+echo "--- Finished (rc=$RC) $(date) ---  cache: ${CACHE}"
+echo "Next: qsub -v CFG=${CFG}${SUFFIX:+,RECOVER=1} supervised_fit.pbs"
+exit $RC

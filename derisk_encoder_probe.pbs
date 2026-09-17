@@ -1,0 +1,68 @@
+#!/bin/bash
+
+# =============================================================================
+# Encoder-swap probe: is the M&Ms domain gap SPECIFIC to CineMA's cine-pretraining,
+# or FUNDAMENTAL to any frozen appearance encoder?
+#
+# Runs the SAME frozen-feature probe (Mahalanobis / kNN on NOR-only features,
+# derisk_cinema.py) with three 2-D backbones on the identical legacy 2-D frame
+# feed, so the only thing that changes is the encoder:
+#     dino   = DINOv2 ViT-B/14   (vit_base_patch14_dinov2.lvd142m)
+#     mae    = ImageNet MAE ViT-B (vit_base_patch16_224.mae)
+#     cinema = CineMA on the legacy 2-D feed  (controlled reference)
+#
+# Compare patient-Mean ACDC / M&Ms against CineMA-faithful benchmark 0.76 / 0.59.
+# Gate: if dino/mae lift M&Ms meaningfully above ~0.60 -> build the full 2-D QFAE.
+# =============================================================================
+
+#PBS -N Derisk_EncoderProbe
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+# DINOv2 + MAE weights were pre-cached ON THE LOGIN NODE into $HF_HOME (same
+# pattern as CineMA):
+#   export HF_HOME=$EPHEMERAL/hf_cache
+#   python -c "import timm; timm.create_model('vit_base_patch14_dinov2.lvd142m', pretrained=True, img_size=224); \
+#              timm.create_model('vit_base_patch16_224.mae', pretrained=True, img_size=224)"
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1        # force offline; fail loudly if the cache is missing
+
+COMMON=(
+    --cinema_preproc legacy
+    --acdc_dir ../Dataset_2
+    --mm_dir ../Dataset_1/Training
+    --mm_val_dir ../Dataset_1/Validation
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+    --fit_datasets ACDC MM
+    --val_datasets ACDC MM
+    --knn_k 5
+)
+
+echo "=================== DINOv2 ==================="
+python derisk_cinema.py --backbone dino  --batch_size 32 "${COMMON[@]}" --out_dir ./derisk_out_dino
+RC_DINO=$?
+
+echo "=================== MAE ======================="
+python derisk_cinema.py --backbone mae   --batch_size 32 "${COMMON[@]}" --out_dir ./derisk_out_mae
+RC_MAE=$?
+
+echo "=========== CineMA (legacy 2-D reference) ==========="
+python derisk_cinema.py --backbone cinema --batch_size 8 "${COMMON[@]}" --out_dir ./derisk_out_cinema_legacy
+RC_CIN=$?
+
+echo "--- Finished $(date) ---  RC dino=$RC_DINO mae=$RC_MAE cinema=$RC_CIN"
+echo "Results: derisk_out_{dino,mae,cinema_legacy}/derisk_results.json"
+echo "Compare patient-Mean ACDC/MM to CineMA-faithful 0.76/0.59; gate on M&Ms > ~0.60."
+exit $(( RC_DINO | RC_MAE | RC_CIN ))

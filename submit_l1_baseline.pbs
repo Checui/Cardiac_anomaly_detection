@@ -1,0 +1,54 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# L1-only baseline for the 20-epoch loss head-to-head.
+#
+# Identical to submit_ssim_loss.pbs in every respect EXCEPT the loss: no
+# --lw_ssim (default 0 = the original L1-only objective). Fresh 20-epoch run
+# so both arms share the same code version, data pipeline and W&B logging.
+# Config = the recipe behind the ACDC 0.8125 / M&Ms 0.731 baseline checkpoint
+# (Farneback aux, ACDC+MM+RECON, es_ed, orient+spacing, no N4).
+# -----------------------------------------------------------------------------
+
+#PBS -N Train_FlowL1_Base
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+module load CUDA/11.8.0
+conda install -c conda-forge cudatoolkit=11.8.0 cudnn -y
+source activate mres_env
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+VERSION="l1_baseline_20ep_v1"
+
+# Farneback aux (default --aux_source flow) -> no torch / --reg_repo needed.
+# Checkpoints land in ACDC_MM_RECON_ES_ED_FLOW_NOR_${VERSION} (no _SSIM suffix).
+
+echo "--- Starting Model Training: Flow head, L1-only baseline (version: ${VERSION}) ---"
+
+python run_model.py \
+    --model_type flow \
+    --datasets ACDC MM RECON \
+    --frame_mode es_ed \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --recon_dir ../reconstructed_sax_images_training_2023 \
+    --orient_normalize \
+    --spacing_normalize \
+    --lw_aux 2.0 \
+    --epochs 20 \
+    --start_epoch 0 \
+    --run_tag "${VERSION}"
+
+echo "--- Training finished ---"
+echo "Job finished on $(date)"

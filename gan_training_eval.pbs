@@ -1,0 +1,52 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# "Varying the training with the score fixed" on the GAN (gan_training_eval.py).
+#
+# Re-scores EXISTING checkpoints (nothing retrained) on held-out ACDC-50 +
+# M&Ms-Testing (+ M&Ms-Validation for honest selection) with the headline score
+# fixed (flow-SSIM / frame-SSIM, full frame, middle-60%, patient mean), paired
+# patient-cluster bootstrap against the headline checkpoint:
+#   the frame pair   es_ed (headline) / ed_es / consecutive systolic pairs
+#                    (the latter scored on its own pairs AND on the ED->ES pair)
+#   the pretext      flow prediction (GAN_tf) vs future-frame prediction (GAN_tf_rgb)
+#   the flow teacher Farneback vs the frozen registration network (confounded:
+#                    those runs are ACDC+MM only, N4 on, 100 epochs; scored at
+#                    epoch 100 with their own preprocessing and teacher)
+# 11 configs, 9 checkpoints, 7 data loads (N4 + registration-teacher loads are
+# CPU-bound at load time; the reg-net runs on CPU via torch in mres_env).
+# Sanity anchor: flow_es_ed/flow_ssim must reproduce 0.8125 / 0.7310 / 0.699;
+# rgb_ed_es_v1/aux_msegrad/top20 must reproduce tab:gan_nomodel ACDC 0.850.
+# Output: gan_training_out/{summary.json, scores.npz}.
+# -----------------------------------------------------------------------------
+
+#PBS -N GAN_Training
+#PBS -l walltime=08:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+module load CUDA/11.8.0
+conda install -c conda-forge cudatoolkit=11.8.0 cudnn -y
+source activate mres_env
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=8
+
+python -u gan_training_eval.py \
+    --ckpt_root ./training_saver \
+    --acdc_dir ../Dataset_2 \
+    --mm_test_dir ../Dataset_1/Testing \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --orient_params ../reconstructed_sax_images_training_2023/segmentation/orientation_params.csv \
+    --reg_repo ../biomechanics-cardiac-motion-hpc \
+    --batch_size 16 \
+    --out_dir ./gan_training_out
+
+echo "Job finished on $(date)"

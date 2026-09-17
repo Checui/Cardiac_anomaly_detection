@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# "Reverting the adaptations" on the baseline GAN (gan_revert_eval.py).
+#
+# Rescoring of the frozen baseline checkpoint
+# (ACDC_MM_RECON_ES_ED_FLOW_NOR_v2_orient_spacing_added, ep 50) on held-out
+# ACDC-50 + M&Ms-Testing (+ M&Ms-Validation for honest selection), undoing
+# each Chapter-4 adaptation in turn: all slices instead of middle-60%
+# (2nd inference pass with the slice crop monkeypatched off), the paper's
+# 16x16 max-flow-error patch instead of full-frame pooling, the paper's
+# eq-8 lambda_S=0.2 combination instead of the 2:1 full-frame one, and
+# slice-level AUC (with the per-patient max-normalisation analogue of the
+# paper's per-video normalisation) instead of patient-level.
+# Sanity anchor: headline flow-SSIM row must reproduce 0.8125 / 0.7310.
+# -----------------------------------------------------------------------------
+
+#PBS -N GAN_Revert
+#PBS -l walltime=08:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+module load CUDA/11.8.0
+conda install -c conda-forge cudatoolkit=11.8.0 cudnn -y
+source activate mres_env
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+python gan_revert_eval.py \
+    --ckpt_dir ./training_saver/ACDC_MM_RECON_ES_ED_FLOW_NOR_v2_orient_spacing_added \
+    --epoch 50 \
+    --acdc_dir ../Dataset_2 \
+    --mm_test_dir ../Dataset_1/Testing \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --orient_params ../reconstructed_sax_images_training_2023/segmentation/orientation_params.csv \
+    --batch_size 16 \
+    --out_dir ./gan_revert_out
+
+echo "Job finished on $(date)"

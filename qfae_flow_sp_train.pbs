@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# =============================================================================
+# PHASE A — SINGLE-PASS CineMA dual-stream training. Input=ED, reconstruct ED,
+# predict ED->ES Farneback flow (1 record/patient). Same arch as qfae_flow, only
+# --single_pass differs. New out-dir; the double-pass qfae_flow_out is untouched.
+# =============================================================================
+
+#PBS -N QFAE_FlowSP
+#PBS -l walltime=06:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+python qfae_train.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --fit_datasets ACDC MM \
+    --flow --single_pass --lambda_flow 2.0 \
+    --qformer_blocks 2 --decoder_dim 512 --decoder_depth 6 \
+    --perceptual_layers 5 8 11 \
+    --epochs 120 --batch_size 2 --lr 1e-4 --warmup_epochs 10 \
+    --out_dir ./qfae_flow_sp_out
+RC=$?
+echo "--- Finished (rc=$RC) $(date) ---  model: ./qfae_flow_sp_out/qfae.pt"
+exit $RC

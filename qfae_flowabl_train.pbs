@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# =============================================================================
+# FLOW-HEAD ABLATIONS on the best 2-D model (MAE@224). ONE batched train job.
+#
+#  (A) FLOW-ONLY + lambda_appe sweep (embedding appearance). Tests whether the
+#      appearance head STEALS CAPACITY from the flow head on the shared Q-Former.
+#      lambda_appe in {0.0, 0.25, 0.5}; lambda_appe=1.0 is the existing baseline
+#      (qfae_dino2d_mae224_out -> flow_SSIM/mean M&Ms-Test 0.714). lambda_appe=0.0
+#      = pure flow-only (appearance head gets zero gradient).
+#
+#  (B) PIXEL-SPACE appearance (GAN-style MSE + gradient loss) + flow, both heads,
+#      on two encoders (MAE@224, DINOv2@224). Tests whether a pixel-space
+#      appearance stream (measured/scored like the GAN, not in embedding space)
+#      is a better stream to FUSE with flow than the perceptual/embedding one.
+#
+# Eval is chained separately: qsub -W depend=afterok:<jobid> qfae_flowabl_eval.pbs
+# =============================================================================
+
+#PBS -N QFAE_FlowAbl
+#PBS -l walltime=10:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+python qfae_dino.py || { echo "SMOKE FAILED — aborting"; exit 1; }
+RC=0
+CSV="../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+TRAIN="--flow --epochs 80 --batch_size 32 --lr 1e-4 --warmup_epochs 8 --lambda_flow 2.0"
+DATA="--acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training --fit_datasets ACDC MM"
+
+# ---- (A) flow-only + lambda_appe sweep, MAE@224 (embedding appearance) ----
+for LAM in 0.0 0.25 0.5; do
+  echo "=== (A) train MAE@224 flow, lambda_appe=${LAM} (embedding) ==="
+  python qfae_dino_train.py ${TRAIN} ${DATA} --mm_csv "${CSV}" \
+    --dino_model vit_base_patch16_224.mae --img_size 224 --perceptual_backbone dino \
+    --appe_space embedding --lambda_appe ${LAM} \
+    --out_dir ./qfae_flowonly_la${LAM}_out || RC=1
+done
+
+# ---- (B) pixel-space appearance + flow, both heads ----
+echo "=== (B) train MAE@224 flow + PIXEL appearance ==="
+python qfae_dino_train.py ${TRAIN} ${DATA} --mm_csv "${CSV}" \
+  --dino_model vit_base_patch16_224.mae --img_size 224 --perceptual_backbone dino \
+  --appe_space pixel --lambda_appe 1.0 \
+  --out_dir ./qfae_pixelappe_mae224_out || RC=1
+
+echo "=== (B) train DINOv2@224 flow + PIXEL appearance ==="
+python qfae_dino_train.py ${TRAIN} ${DATA} --mm_csv "${CSV}" \
+  --dino_model vit_base_patch14_dinov2.lvd142m --img_size 224 --perceptual_backbone dino \
+  --appe_space pixel --lambda_appe 1.0 \
+  --out_dir ./qfae_pixelappe_dino224_out || RC=1
+
+echo "--- Finished (rc=$RC) $(date) ---"
+exit $RC

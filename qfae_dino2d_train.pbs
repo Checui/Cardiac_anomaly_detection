@@ -1,0 +1,54 @@
+#!/bin/bash
+
+# =============================================================================
+# PHASE B — GENUINELY-2-D DINOv2/MAE motion QFAE. CineMA-faithful preprocessing
+# exploded to per-slice 2-D samples; ED single-pass; reconstruct the slice +
+# predict its 2-D ED->ES flow. NO slice token (pure 2-D QFormerAE2D). Coupled
+# 2-D scorer (encoder scores itself). Resolution sweep via CFG.
+#   qsub -v CFG=dino224 qfae_dino2d_train.pbs   -> DINOv2 @224
+#   qsub -v CFG=dino518 qfae_dino2d_train.pbs   -> DINOv2 @518 (its optimum)
+#   qsub -v CFG=mae224  qfae_dino2d_train.pbs   -> MAE @224
+# Chain the eval: qsub -W depend=afterok:<jobid> -v CFG=<cfg> qfae_dino2d_eval.pbs
+# =============================================================================
+
+#PBS -N QFAE_Dino2D
+#PBS -l walltime=06:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)  CFG=${CFG}"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+case "${CFG}" in
+  dino224)   MODEL="vit_base_patch14_dinov2.lvd142m";  SIZE=224; BS=32 ;;
+  dino518)   MODEL="vit_base_patch14_dinov2.lvd142m";  SIZE=518; BS=8  ;;
+  mae224)    MODEL="vit_base_patch16_224.mae";         SIZE=224; BS=32 ;;
+  dinov3224) MODEL="vit_base_patch16_dinov3.lvd1689m"; SIZE=224; BS=32 ;;
+  *) echo "ERROR: set -v CFG=dino224|dino518|mae224|dinov3224"; exit 2 ;;
+esac
+# RECOVER=1 adds the 25 GE M&Ms-Training cases whose CSV carries ED==ES==0 (38 NOR -> 48,
+# training vendors Philips+Siemens -> +GE). Separate OUT so the historical run is untouched.
+SUFFIX=""; EXTRA=""
+if [ "${RECOVER}" = "1" ]; then SUFFIX="_ge"; EXTRA="--recover_edes"; fi
+OUT="./qfae_dino2d_${CFG}${SUFFIX}_out"
+
+python qfae_dino.py || { echo "SMOKE FAILED — aborting"; exit 1; }
+
+echo "=== train 2-D ${CFG} (${MODEL} @${SIZE}) + flow, coupled scorer ${EXTRA} ==="
+python qfae_dino_train.py \
+    --flow --dino_model "${MODEL}" --img_size ${SIZE} --perceptual_backbone dino \
+    --acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --fit_datasets ACDC MM \
+    --epochs 80 --batch_size ${BS} --lr 1e-4 --warmup_epochs 8 --lambda_flow 2.0 \
+    --out_dir "${OUT}" ${EXTRA}
+RC=$?
+echo "--- Finished (rc=$RC) $(date) ---  model: ${OUT}/qfae.pt"
+exit $RC

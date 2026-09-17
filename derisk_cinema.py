@@ -28,15 +28,23 @@ PIPELINE
 Nothing here touches the GAN. It reuses the loaders so results are directly
 comparable to what run_model.py logs.
 
-INPUT-GEOMETRY NOTE
--------------------
-CineMA's SAX pathway expects a (1, 192, 192, 16) single-channel stack. Our ICCV
-frames are single 2-D SAX slices at 128x128. Each frame is resized to 192x192
-and placed in a depth stack that is either zero-padded to 16 (--sax_fill zero,
-matching CineMA's own feature-extraction example) or replicated across the 16
-slices (--sax_fill replicate). Every sample uses the identical scheme, so the
-padding is a *systematic* offset that cancels in the rank-based AUC. This is the
-documented approximation of the memo's "input geometry (adaptation cost)".
+INPUT GEOMETRY — TWO PREPROCESSING PATHS (--cinema_preproc)
+----------------------------------------------------------
+CineMA's SAX pathway expects a (1, 192, 192, 16) single-channel stack.
+
+  * faithful (default): CineMA's OWN canonical SAX pipeline (cinema_faithful.py)
+    — resample each 3-D ED/ES volume to 1.0 mm/px, LV-bbox center-crop to 192,
+    clip 0.95/99.5 percentiles, feed the REAL depth-16 slice stack. Read straight
+    from the raw ACDC/M&Ms files, so the frozen features are ON-distribution. The
+    unit is a 3-D stack per (patient, phase); patient scores aggregate Mean/Max
+    over ED+ES. The orient/spacing/N4 and --sax_fill flags DO NOT apply here.
+
+  * legacy: single 2-D SAX slice at 128x128 (via data_loader.py) resized to 192
+    and placed in a depth stack that is zero-padded to 16 (--sax_fill zero,
+    matching CineMA's feature-extraction example) or replicated (--sax_fill
+    replicate). Off-distribution for CineMA, but the padding is a *systematic*
+    offset that mostly cancels in the rank-based AUC. Only this path honours the
+    orient/spacing/N4 flags (its data comes from the ICCV loaders).
 """
 
 import os
@@ -83,10 +91,10 @@ def frame_to_sax(gray, sax_fill):
 def extract_features(model, frames, device, dtype, args):
     """frames: (N, H, W, 3) in [0,1] -> (N, D) frozen-CineMA feature vectors.
 
-    Each feature tensor from feature_forward is global-average-pooled over its
-    trailing (spatial) dims, assuming a channel-first (B, C, ...) layout — the
-    expected convention for CineMA's conv-hybrid encoder. Actual shapes are
-    printed on the first batch so the layout can be verified/refined.
+    Each feature tensor from feature_forward is (B, n_patches, enc_emb_dim=768)
+    — channel-LAST tokens — so it is average-pooled over the patch/token dim,
+    keeping the 768-d embedding (cls token -> its 768-d vector; sax patches ->
+    their mean 768-d vector). Actual shapes are printed on the first batch.
     """
     feats, printed = [], False
     n = len(frames)
@@ -108,8 +116,69 @@ def extract_features(model, frames, device, dtype, args):
         vecs = []
         for k in keys:
             v = fd[k].float()
-            vecs.append(v.flatten(2).mean(dim=2) if v.dim() > 2 else v)  # (b, C_k)
+            # feature_forward returns (batch, n_patches, enc_emb_dim=768) — token/
+            # patch axis in the MIDDLE, embedding LAST. Pool over the patch dim
+            # (keep the 768-d embedding): cls (b,1,768)->(b,768), sax (b,2304,768)->(b,768).
+            vecs.append(v.flatten(1, -2).mean(dim=1) if v.dim() > 2 else v)  # -> (b, 768)
         feats.append(torch.cat(vecs, dim=1).cpu().numpy())
+        print(f"\r[derisk] features {min(start + args.batch_size, n)}/{n}", end="", flush=True)
+    print()
+    return np.concatenate(feats, axis=0)
+
+
+# ── Alternative frozen backbones: 2-D timm ViTs (DINOv2 / vanilla MAE) ────────
+def load_timm_backbone(args, device):
+    """Load a frozen 2-D timm ViT (DINOv2 or ImageNet-MAE); return (model, data_cfg).
+
+    Both candidates are ViT-B (768-d), matching CineMA's embedding width, so the
+    downstream StandardScaler/LedoitWolf/kNN scorers are unchanged. img_size is
+    forced to 224 (pos-embed interpolated) to keep token counts + compute modest
+    and comparable across encoders — the same resolution the original QFAE uses.
+    """
+    import timm
+    from timm.data import resolve_model_data_config
+    name = args.dino_model if args.backbone == 'dino' else args.mae_model
+    print(f"\n=== Loading frozen timm backbone: {name} ({args.backbone}) ===")
+    model = timm.create_model(name, pretrained=True, num_classes=0, img_size=224)
+    model.eval().to(device)
+    for p in model.parameters():
+        p.requires_grad_(False)
+    cfg = resolve_model_data_config(model)          # mean/std for this checkpoint
+    n_prefix = getattr(model, 'num_prefix_tokens', 1)
+    print(f"[derisk] {name}: mean={cfg['mean']} std={cfg['std']} "
+          f"num_prefix_tokens={n_prefix} (CLS+registers dropped before GAP)")
+    return model, cfg
+
+
+def extract_features_timm(model, frames, device, dtype, args, cfg):
+    """frames: (N, H, W, 3) in [0,1] -> (N, 768) frozen 2-D ViT features.
+
+    Per frame: resize to 224, timm-normalise (the checkpoint's own mean/std),
+    forward_features -> (b, num_prefix + n_patch, 768); drop the prefix tokens
+    (CLS + any DINOv2 registers) and mean-pool the patch tokens -> (b, 768).
+    Same GAP-over-patch-tokens reduction the CineMA path uses (extract_features).
+    """
+    size = 224
+    mean = torch.tensor(cfg['mean'], device=device).view(1, 3, 1, 1)
+    std = torch.tensor(cfg['std'], device=device).view(1, 3, 1, 1)
+    n_prefix = getattr(model, 'num_prefix_tokens', 1)
+    feats, printed = [], False
+    n = len(frames)
+    for start in range(0, n, args.batch_size):
+        chunk = frames[start:start + args.batch_size]                      # (b,H,W,3) in [0,1]
+        batch = np.stack([cv2.resize(f.astype(np.float32), (size, size),
+                                     interpolation=cv2.INTER_LINEAR) for f in chunk])  # (b,224,224,3)
+        x = torch.from_numpy(batch).permute(0, 3, 1, 2).contiguous().to(device)        # (b,3,224,224)
+        x = (x - mean) / std                                               # normalise in fp32
+        use_amp = (device.type == 'cuda' and dtype != torch.float32)
+        with torch.no_grad(), torch.autocast("cuda", dtype=dtype, enabled=use_amp):
+            tok = model.forward_features(x)                                # (b, prefix+patches, 768)
+        tok = tok.float()
+        vec = tok[:, n_prefix:, :].mean(dim=1) if tok.dim() == 3 else tok  # GAP over patch tokens
+        if not printed:
+            print(f"[derisk] {args.backbone} forward_features {tuple(tok.shape)} -> feat {tuple(vec.shape)}")
+            printed = True
+        feats.append(vec.cpu().numpy())
         print(f"\r[derisk] features {min(start + args.batch_size, n)}/{n}", end="", flush=True)
     print()
     return np.concatenate(feats, axis=0)
@@ -146,6 +215,27 @@ def aggregate_to_patient(scores, pids, slcs, labels):
         slice_means = np.array([float(np.mean(s[sl == u])) for u in np.unique(sl)])
         out['SliceMax'][i] = float(np.max(slice_means))
         out['SliceTop20'][i] = _top20_mean(slice_means)
+        plabels.append(labels[m][0])
+    return out, np.array(plabels)
+
+
+def aggregate_stacks_to_patient(scores, pids, labels):
+    """Per-stack scores -> per-patient (Mean / Max over that patient's stacks).
+
+    The faithful path's unit is a 3-D stack per (patient, phase), so a patient
+    has at most two scores (ED, ES). SliceMax / FrameTop20 etc. are meaningless
+    at this granularity, so only Mean and Max are reported.
+    """
+    scores = np.asarray(scores, dtype=float)
+    pids = np.asarray(pids)
+    labels = np.asarray(labels)
+    uniq = np.unique(pids)
+    out = {'Mean': np.zeros(len(uniq)), 'Max': np.zeros(len(uniq))}
+    plabels = []
+    for i, pid in enumerate(uniq):
+        m = (pids == pid)
+        out['Mean'][i] = float(np.mean(scores[m]))
+        out['Max'][i] = float(np.max(scores[m]))
         plabels.append(labels[m][0])
     return out, np.array(plabels)
 
@@ -238,6 +328,82 @@ def load_val(args):
     return frames, np.array(labels), np.array(pids), np.array(slcs), np.array(dsids)
 
 
+# ── Shared scoring + AUC report (both preprocessing paths) ───────────────────
+def _score_and_report(args, fit_feats, val_feats, val_labels, val_pids, val_ds,
+                      patient_agg, agg_names, unit, extra_meta, save_extra):
+    """Fit Mahalanobis + kNN on NOR features, score val, print/save AUCs.
+
+    `unit` is 'FRAME' (legacy 2-D slices) or 'STACK' (faithful 3-D stacks) and
+    only affects labels. `patient_agg(scores) -> (dict_of_agg_arrays, plabels)`
+    supplies the path-specific patient aggregation; `agg_names` names the
+    aggregators to report. `extra_meta` / `save_extra` add path-specific fields
+    to the JSON / npz.
+    """
+    print(f"[derisk] feature dim = {fit_feats.shape[1]} "
+          f"(fit {fit_feats.shape[0]}, val {val_feats.shape[0]})")
+    unit_key = unit.lower()
+
+    # fit training-free normal models on NOR features
+    scaler = StandardScaler().fit(fit_feats)
+    Ftr, Fva = scaler.transform(fit_feats), scaler.transform(val_feats)
+    if args.pca > 0:
+        n_comp = min(args.pca, Ftr.shape[1], Ftr.shape[0])
+        pca = PCA(n_components=n_comp).fit(Ftr)
+        Ftr, Fva = pca.transform(Ftr), pca.transform(Fva)
+        print(f"[derisk] PCA -> {n_comp} dims")
+
+    lw = LedoitWolf().fit(Ftr)
+    maha = lw.mahalanobis(Fva)                        # squared Mahalanobis distance
+    k = min(args.knn_k, len(Ftr))
+    nn = NearestNeighbors(n_neighbors=k).fit(Ftr)
+    dist, _ = nn.kneighbors(Fva)
+    knn = dist.mean(axis=1)                           # mean distance to k nearest normals
+
+    results = {'feature_dim': int(fit_feats.shape[1]),
+               'n_fit': int(fit_feats.shape[0]), 'n_val': int(val_feats.shape[0]),
+               'feature_layers': args.feature_layers,
+               'cinema_preproc': args.cinema_preproc, 'unit': unit_key,
+               'scorers': {}}
+    results.update(extra_meta)
+    scorers = {'mahalanobis': maha, 'knn': knn}
+
+    print("\n" + "=" * 68)
+    print("RESULTS  (AUC: NOR vs disease; compare patient-level Mean to Flow-SSIM ~0.73-0.77)")
+    print("=" * 68)
+    for name, sc in scorers.items():
+        entry = {unit_key: one_vs_nor_aucs(sc, val_labels), 'patient': {}}
+        print(f"\n### scorer = {name}")
+        fr = entry[unit_key]
+        print(f"  [{unit}]  overall={fr.get('overall', float('nan')):.4f}  "
+              + "  ".join(f"{d}={fr[d]:.4f}" for d in sorted(fr) if d != 'overall'))
+        pat, plabels = patient_agg(sc)
+        for agg in agg_names:
+            au = one_vs_nor_aucs(pat[agg], plabels)
+            entry['patient'][agg] = au
+            print(f"  [PAT-{agg:<10}] overall={au.get('overall', float('nan')):.4f}  "
+                  + "  ".join(f"{d}={au[d]:.4f}" for d in sorted(au) if d != 'overall'))
+        # per-dataset overall (unit level)
+        entry['per_dataset'] = {}
+        for ds in sorted(set(val_ds)):
+            m = (val_ds == ds)
+            au = one_vs_nor_aucs(sc[m], val_labels[m])
+            entry['per_dataset'][ds] = au
+            if 'overall' in au:
+                print(f"  [{unit}-{ds}] overall={au['overall']:.4f}")
+        results['scorers'][name] = entry
+
+    # save
+    with open(os.path.join(args.out_dir, 'derisk_results.json'), 'w') as f:
+        json.dump(results, f, indent=2)
+    np.savez_compressed(os.path.join(args.out_dir, 'derisk_arrays.npz'),
+                        fit_feats=fit_feats, val_feats=val_feats,
+                        maha=maha, knn=knn,
+                        val_labels=val_labels, val_pids=val_pids, val_ds=val_ds,
+                        **save_extra)
+    print(f"\n[derisk] wrote {args.out_dir}/derisk_results.json and derisk_arrays.npz")
+    print("[derisk] DONE. If patient-level Mean AUC >~ 0.73, the reverse-distillation build is justified.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -263,6 +429,15 @@ def main():
     ap.add_argument('--n4_iterations', type=int, default=50)
     ap.add_argument('--n4_levels', type=int, default=4)
 
+    # frozen backbone: CineMA (default) or a generic 2-D timm ViT (DINOv2 / MAE).
+    # dino/mae are 2-D single-frame encoders -> only the legacy 2-D frame path applies
+    # (faithful is CineMA's 3-D SAX pipeline). Both are ViT-B/768-d so scorers are unchanged.
+    ap.add_argument('--backbone', choices=['cinema', 'dino', 'mae'], default='cinema',
+                    help='Frozen feature extractor. cinema = CineMA (default, unchanged); '
+                         'dino/mae = 2-D timm ViT (forces --cinema_preproc legacy).')
+    ap.add_argument('--dino_model', default='vit_base_patch14_dinov2.lvd142m')
+    ap.add_argument('--mae_model', default='vit_base_patch16_224.mae')
+
     # CineMA feature extraction
     ap.add_argument('--sax_fill', choices=['zero', 'replicate'], default='zero',
                     help='How to build the 16-slice SAX depth stack from one 2-D frame. '
@@ -276,7 +451,25 @@ def main():
     ap.add_argument('--knn_k', type=int, default=5)
     ap.add_argument('--pca', type=int, default=0, help='PCA dims before scoring (0 = off).')
     ap.add_argument('--max_fit', type=int, default=0, help='Cap NOR-fit frames (0 = all).')
+
+    ap.add_argument('--cinema_preproc', choices=['faithful', 'legacy'], default='faithful',
+                    help='faithful = CineMA-canonical 3-D SAX stacks (resample to 1mm -> '
+                         'LV-bbox center-crop 192 -> clip 0.95/99.5 -> depth-16), read straight '
+                         'from the raw ACDC/M&Ms files via cinema_faithful.py; legacy = single '
+                         '2-D ICCV frame (data_loader.py) resized to 192 with zero/replicate '
+                         'depth padding. faithful reads CineMA features on-distribution; the '
+                         'orientation/spacing/N4 flags apply to the legacy path only.')
+    ap.add_argument('--adapter_path', default=None,
+                    help='Path to a cinema_lora.py adapter checkpoint (.pt). If set, LoRA is '
+                         'injected into the CineMA encoder and its weights loaded right after '
+                         'from_pretrained(), so BOTH preprocessing paths extract features from '
+                         'the NOR-adapted encoder. Default None = frozen pretrained encoder.')
     args = ap.parse_args()
+
+    # 2-D timm encoders can't consume CineMA's 3-D faithful stacks -> force legacy frames.
+    if args.backbone != 'cinema' and args.cinema_preproc != 'legacy':
+        print(f"[derisk] backbone={args.backbone} is a 2-D encoder; forcing --cinema_preproc legacy")
+        args.cinema_preproc = 'legacy'
 
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -289,87 +482,75 @@ def main():
         dtype = torch.bfloat16
     print(f"[derisk] device={device}, dtype={dtype}")
 
-    # 1-2. data
-    configure_loaders(args)
-    print("\n=== Loading NOR fit frames ===")
-    fit_frames = load_fit_frames(args)
-    print("\n=== Loading validation frames ===")
-    val_frames, val_labels, val_pids, val_slcs, val_ds = load_val(args)
+    # frozen backbone: CineMA (both paths) or a 2-D timm ViT (legacy path only).
+    _timm_cfg = None
+    if args.backbone == 'cinema':
+        print("\n=== Loading frozen CineMA (from_pretrained) ===")
+        model = CineMA.from_pretrained()
+        if args.adapter_path:
+            import cinema_lora as lora
+            meta = lora.apply_adapter(model, args.adapter_path)
+            print(f"[derisk] LoRA-adapted encoder loaded from {args.adapter_path} (meta={meta})")
+        model.eval().to(device)
+        for p in model.parameters():
+            p.requires_grad_(False)
+    else:
+        model, _timm_cfg = load_timm_backbone(args, device)
+
+    def _extract(frames):
+        if args.backbone == 'cinema':
+            return extract_features(model, frames, device, dtype, args)
+        return extract_features_timm(model, frames, device, dtype, args, _timm_cfg)
+
     from collections import Counter
-    print(f"[derisk] val label counts: {dict(Counter(val_labels))}")
 
-    # 3. frozen CineMA features
-    print("\n=== Loading frozen CineMA (from_pretrained) ===")
-    model = CineMA.from_pretrained()
-    model.eval().to(device)
-    for p in model.parameters():
-        p.requires_grad_(False)
+    if args.cinema_preproc == 'faithful':
+        # CineMA-canonical 3-D SAX stacks, read straight from the raw files.
+        import cinema_faithful as cf
+        print("\n=== CineMA-faithful preprocessing (canonical 3-D SAX stacks) ===")
+        print("--- Building NOR fit records ---")
+        fit_records = cf.build_fit_records(args)
+        if args.max_fit and len(fit_records) > args.max_fit:
+            rng = np.random.RandomState(0)
+            idx = rng.permutation(len(fit_records))[:args.max_fit]
+            fit_records = [fit_records[i] for i in idx]
+            print(f"[derisk] fit set capped to {len(fit_records)} stacks (--max_fit)")
+        print("--- Building validation records ---")
+        val_records = cf.build_val_records(args)
+        print(f"[derisk] val label counts: "
+              f"{dict(Counter(r['label'] for r in val_records))}")
 
-    print("\n=== Extracting features: NOR fit set ===")
-    fit_feats = extract_features(model, fit_frames, device, dtype, args)
-    print("=== Extracting features: validation set ===")
-    val_feats = extract_features(model, val_frames, device, dtype, args)
-    print(f"[derisk] feature dim = {fit_feats.shape[1]} "
-          f"(fit {fit_feats.shape[0]}, val {val_feats.shape[0]})")
+        print("\n=== Extracting features: NOR fit set ===")
+        fit_feats, *_ = cf.extract_records_features(
+            model, fit_records, device, dtype, args.batch_size, args.feature_layers)
+        print("=== Extracting features: validation set ===")
+        val_feats, val_pids, val_labels, val_ds, val_phases = cf.extract_records_features(
+            model, val_records, device, dtype, args.batch_size, args.feature_layers)
 
-    # 4. fit training-free normal models on NOR features
-    scaler = StandardScaler().fit(fit_feats)
-    Ftr, Fva = scaler.transform(fit_feats), scaler.transform(val_feats)
-    if args.pca > 0:
-        n_comp = min(args.pca, Ftr.shape[1], Ftr.shape[0])
-        pca = PCA(n_components=n_comp).fit(Ftr)
-        Ftr, Fva = pca.transform(Ftr), pca.transform(Fva)
-        print(f"[derisk] PCA -> {n_comp} dims")
+        _score_and_report(
+            args, fit_feats, val_feats, val_labels, val_pids, val_ds,
+            patient_agg=lambda sc: aggregate_stacks_to_patient(sc, val_pids, val_labels),
+            agg_names=['Mean', 'Max'], unit='STACK',
+            extra_meta={}, save_extra={'val_phases': val_phases})
+    else:
+        # Legacy single-2-D-slice path via the ICCV data_loader.
+        configure_loaders(args)
+        print("\n=== Loading NOR fit frames ===")
+        fit_frames = load_fit_frames(args)
+        print("\n=== Loading validation frames ===")
+        val_frames, val_labels, val_pids, val_slcs, val_ds = load_val(args)
+        print(f"[derisk] val label counts: {dict(Counter(val_labels))}")
 
-    lw = LedoitWolf().fit(Ftr)
-    maha = lw.mahalanobis(Fva)                       # squared Mahalanobis distance
-    k = min(args.knn_k, len(Ftr))
-    nn = NearestNeighbors(n_neighbors=k).fit(Ftr)
-    dist, _ = nn.kneighbors(Fva)
-    knn = dist.mean(axis=1)                           # mean distance to k nearest normals
+        print("\n=== Extracting features: NOR fit set ===")
+        fit_feats = _extract(fit_frames)
+        print("=== Extracting features: validation set ===")
+        val_feats = _extract(val_frames)
 
-    # 5-6. AUC report (frame-level + patient-level), per scorer
-    results = {'feature_dim': int(fit_feats.shape[1]),
-               'n_fit': int(len(fit_frames)), 'n_val': int(len(val_frames)),
-               'sax_fill': args.sax_fill, 'feature_layers': args.feature_layers,
-               'scorers': {}}
-    scorers = {'mahalanobis': maha, 'knn': knn}
-
-    print("\n" + "=" * 68)
-    print("RESULTS  (AUC: NOR vs disease; compare patient-level Mean to Flow-SSIM ~0.73-0.77)")
-    print("=" * 68)
-    for name, sc in scorers.items():
-        entry = {'frame': one_vs_nor_aucs(sc, val_labels), 'patient': {}}
-        print(f"\n### scorer = {name}")
-        fr = entry['frame']
-        print(f"  [FRAME]  overall={fr.get('overall', float('nan')):.4f}  "
-              + "  ".join(f"{d}={fr[d]:.4f}" for d in sorted(fr) if d != 'overall'))
-        pat, plabels = aggregate_to_patient(sc, val_pids, val_slcs, val_labels)
-        for agg in _AGGS:
-            au = one_vs_nor_aucs(pat[agg], plabels)
-            entry['patient'][agg] = au
-            print(f"  [PAT-{agg:<10}] overall={au.get('overall', float('nan')):.4f}  "
-                  + "  ".join(f"{d}={au[d]:.4f}" for d in sorted(au) if d != 'overall'))
-        # per-dataset overall (frame level)
-        entry['per_dataset'] = {}
-        for ds in sorted(set(val_ds)):
-            m = (val_ds == ds)
-            au = one_vs_nor_aucs(sc[m], val_labels[m])
-            entry['per_dataset'][ds] = au
-            if 'overall' in au:
-                print(f"  [FRAME-{ds}] overall={au['overall']:.4f}")
-        results['scorers'][name] = entry
-
-    # save
-    with open(os.path.join(args.out_dir, 'derisk_results.json'), 'w') as f:
-        json.dump(results, f, indent=2)
-    np.savez_compressed(os.path.join(args.out_dir, 'derisk_arrays.npz'),
-                        fit_feats=fit_feats, val_feats=val_feats,
-                        maha=maha, knn=knn,
-                        val_labels=val_labels, val_pids=val_pids,
-                        val_slcs=val_slcs, val_ds=val_ds)
-    print(f"\n[derisk] wrote {args.out_dir}/derisk_results.json and derisk_arrays.npz")
-    print("[derisk] DONE. If patient-level Mean AUC >~ 0.73, the reverse-distillation build is justified.")
+        _score_and_report(
+            args, fit_feats, val_feats, val_labels, val_pids, val_ds,
+            patient_agg=lambda sc: aggregate_to_patient(sc, val_pids, val_slcs, val_labels),
+            agg_names=_AGGS, unit='FRAME',
+            extra_meta={'sax_fill': args.sax_fill}, save_extra={'val_slcs': val_slcs})
 
 
 if __name__ == "__main__":

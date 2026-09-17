@@ -1,0 +1,57 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# Mixed L1+SSIM flow-head loss vs the L1 baseline.
+#
+# Trains the flow GAN with the new --lw_ssim term (GAN_tf.py). 20-epoch
+# head-to-head against submit_l1_baseline.pbs: identical config (Farneback aux,
+# ACDC+MM+RECON, es_ed, orient+spacing, no N4 — the recipe behind the
+# ACDC 0.8125 / M&Ms 0.731 baseline), only the loss differs:
+# lw_aux 2.0 (L1, unchanged) + lw_ssim 1.0 (new).
+# Compare Val_AUC_Flow_SSIM / patient-level SSIM AUCs in W&B between the two runs.
+# -----------------------------------------------------------------------------
+
+#PBS -N Train_FlowSSIM_Mix
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+module load CUDA/11.8.0
+conda install -c conda-forge cudatoolkit=11.8.0 cudnn -y
+source activate mres_env
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+VERSION="ssim_l1_mix_20ep_v1"
+
+# Farneback aux (default --aux_source flow) -> no torch / --reg_repo needed.
+# Checkpoints land in ACDC_MM_RECON_ES_ED_FLOW_NOR_SSIM_${VERSION}
+# (the _SSIM suffix is auto-appended when --lw_ssim > 0).
+
+echo "--- Starting Model Training: Flow head, L1+SSIM mixed loss (version: ${VERSION}) ---"
+
+python run_model.py \
+    --model_type flow \
+    --datasets ACDC MM RECON \
+    --frame_mode es_ed \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --recon_dir ../reconstructed_sax_images_training_2023 \
+    --orient_normalize \
+    --spacing_normalize \
+    --lw_aux 2.0 \
+    --lw_ssim 1.0 \
+    --epochs 20 \
+    --start_epoch 0 \
+    --run_tag "${VERSION}"
+
+echo "--- Training finished ---"
+echo "Job finished on $(date)"

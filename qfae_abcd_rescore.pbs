@@ -1,0 +1,79 @@
+#!/bin/bash
+
+# =============================================================================
+# C/D BATCH — RESCORING ONLY. No training: the flow head's prediction is fixed,
+# only the way we turn (pred - gt) into a number changes. Runs against the
+# EXISTING trained checkpoints, so this can be submitted immediately and does not
+# wait on the A/B arms.
+#
+#  (C) flow score-way sweep — flow_EPE, flow_EPEn (scale-free), flow_ang
+#      (direction only) and flow_magr (scale-invariant magnitude) are now emitted
+#      by every eval, so they come out of EVERY arm below. The 'maha' arm adds
+#      flow_maha: a PaDiM-style per-position Gaussian fitted to the NOR *training*
+#      residual, i.e. "how unusual is this residual" instead of "how big is it".
+#      Motivation: the pixel score-way sweep showed the metric moves the AUC as
+#      much as the encoder does, and the motion stream has only ever been read
+#      with L1 and 1-SSIM.
+#
+#  (D) ROI pooling — scores are currently pooled over the whole 192 mm crop, most
+#      of which is lung/liver/chest wall, and chest-wall motion is respiratory
+#      (a vendor/protocol nuisance on exactly the axis that is stuck at ~0.73).
+#      Arms: center (fixed disc), motion (top |GT flow|), lv (the heart
+#      segmentation carried through the same crop the preprocessing already uses).
+#
+#  The 'base' arm is the REGRESSION CHECK: roi=none must reproduce
+#  qfae_dino2d_${ENC}_out_mmtest exactly (flow_SSIM/mean 0.812/0.714 for mae224).
+#  analyze_abcd.py asserts this.
+#
+#   qsub -v ENC=mae224 qfae_abcd_rescore.pbs
+#   qsub -v ENC=dino224 qfae_abcd_rescore.pbs
+# =============================================================================
+
+#PBS -N QFAE_ABCD_rescore
+#PBS -l walltime=08:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+ENC=${ENC:-mae224}
+echo "Job started $(date)  ENC=${ENC}"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+python qfae_flowmetrics.py || { echo "FLOWMETRICS SMOKE FAILED — aborting"; exit 1; }
+
+case "${ENC}" in
+  mae224)  MODEL="vit_base_patch16_224.mae";        SRC="./qfae_dino2d_mae224_out"  ;;
+  dino224) MODEL="vit_base_patch14_dinov2.lvd142m"; SRC="./qfae_dino2d_dino224_out" ;;
+  *) echo "ERROR: set -v ENC=mae224|dino224"; exit 2 ;;
+esac
+[ -f "${SRC}/qfae.pt" ] || { echo "ERROR: no checkpoint at ${SRC}/qfae.pt"; exit 2; }
+
+RC=0
+CSV="../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+COMMON="--flow --dino_model ${MODEL} --img_size 224 --perceptual_backbone dino \
+        --acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training --mm_val_dir ../Dataset_1/Testing \
+        --val_datasets ACDC MM --top_frac 0.2 --batch_size 32 --model_path ${SRC}/qfae.pt"
+
+rescore () {   # $1 = arm name, $2.. = extra flags
+  local arm="$1"; shift
+  echo "=== rescore ${ENC} / ${arm}: $* ==="
+  python qfae_dino_eval.py ${COMMON} --mm_csv "${CSV}" "$@" \
+      --out_dir "./qfae_abcd_rescore_${ENC}_${arm}_mmtest" || RC=1
+  echo "--- ${arm} done (rc=$RC) $(date) ---"
+}
+
+rescore base                                        # regression check + the 4 new (C) metrics
+rescore roi_center --roi center --roi_frac 0.5
+rescore roi_motion --roi motion --motion_frac 0.3
+rescore roi_lv     --roi lv
+rescore maha       --maha --fit_datasets ACDC MM    # + the NOR-train residual fit pass
+
+echo "--- ENC=${ENC} rescore finished (rc=$RC) $(date) ---"
+echo "Next (offline): python analyze_abcd.py"
+exit $RC

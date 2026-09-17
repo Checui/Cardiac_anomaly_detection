@@ -1,0 +1,43 @@
+#!/bin/bash
+
+# =============================================================================
+# Variant A: DINOv2 per-slice ENCODER + CineMA SCORER.
+# Tests "is DINOv2 a better encoder than CineMA?" — both nets in their native
+# regime (DINOv2 sees 2-D slices, CineMA judges the real 3-D stack).
+# Compare vs QFAE-CineMA baseline (cinema->cinema) ACDC 0.845 / M&Ms 0.549.
+# =============================================================================
+
+#PBS -N QFAE_HybridA
+#PBS -l walltime=12:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"; echo "node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+# smoke guard: shapes, frozen-net grad isolation, valid-slice masking
+echo "=== smoke: qfae_hybrid.py ==="
+python qfae_hybrid.py || { echo "SMOKE FAILED — aborting"; exit 1; }
+
+echo "=== train Variant A (encoder=dino, scorer=cinema) ==="
+python qfae_hybrid_train.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --fit_datasets ACDC MM \
+    --encoder dino --scorer cinema \
+    --perceptual_layers 5 8 11 \
+    --epochs 150 --batch_size 2 \
+    --out_dir ./qfae_hybrid_a_out
+RC=$?
+
+echo "--- Finished $(date) --- RC=$RC"
+exit $RC

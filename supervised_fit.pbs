@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# =============================================================================
+# Stage 2 of the supervised ceiling probe: grouped-CV linear probes on the cached
+# features. CPU only — kept separate from the GPU stage so the stage you iterate
+# never queues behind a GPU allocation.
+#   qsub -v CFG=mae224 supervised_fit.pbs
+#   qsub -v CFG=mae224,RECOVER=1 supervised_fit.pbs
+# =============================================================================
+
+#PBS -N Sup_Fit
+#PBS -l walltime=02:00:00
+#PBS -l select=1:ncpus=8:mem=32gb
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)  CFG=${CFG} RECOVER=${RECOVER}"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+
+SUFFIX=""
+if [ "${RECOVER}" = "1" ]; then SUFFIX="_ge"; fi
+CACHE="./sup_cache_${CFG}${SUFFIX}"
+OUT="./sup_probe_${CFG}${SUFFIX}_mmtest"
+
+echo "=== supervised fit: ${CACHE} -> ${OUT} ==="
+python supervised_fit.py --cache_dir "${CACHE}" --out_dir "${OUT}" --n_jobs 8 --lovo
+RC=$?
+
+if [ $RC -eq 0 ]; then
+  RECFLAG=""
+  if [ "${RECOVER}" = "1" ]; then RECFLAG="--recovered"; fi
+  echo; echo "=== analysis ==="
+  python analyze_supervised.py --sup_dir "${OUT}" ${RECFLAG}
+fi
+
+echo "--- Finished (rc=$RC) $(date) ---  arrays: ${OUT}/qfae_dino_arrays.npz"
+exit $RC

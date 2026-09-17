@@ -1,0 +1,79 @@
+#!/bin/bash
+
+# =============================================================================
+# One CineMA fine-tune experiment cell (label-efficiency / LODO / control).
+# Parameterized by three plain tokens (no hydra syntax through qsub -v):
+#   qsub -N cf_acdc_frac25_s1 -v DS=acdc,CELL=frac25,SEED=1 cinema_ft_cell.pbs
+#   DS   : acdc | mnms
+#   CELL : frac10|frac25|frac50|frac100 | 5way | lodo<D> | ctrl<D>   (D = disease)
+#          | res5way | resbin  (ResNet50 from random init — the paper's
+#          ResNetRandInit classification baseline; no pretrained backbone)
+#   SEED : 0 | 1 | 2
+# Optional: EVAL_ONLY=1 skips training and just re-scores the saved checkpoint.
+# Optional: SMOKE=1 shrinks training to a ~10-min sanity run (8 samples, 2 epochs)
+#           — still runs the full held-out eval + cohort gate. Use SEED=9 so the
+#           output npz never collides with a real cell.
+# Trains with CineMA's own recipe (full fine-tune from the pretrained UKB
+# backbone), then evaluates the held-out cohort in-job via supervised_ft_eval.py.
+# =============================================================================
+
+#PBS -l walltime=02:00:00
+#PBS -l select=1:ncpus=4:mem=16gb:ngpus=1
+#PBS -m a
+#PBS -M cc4525@imperial.ac.uk
+
+set -u
+echo "Job started $(date)"; echo "Node: $(hostname)"; echo "DS=$DS CELL=$CELL SEED=$SEED"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+export WANDB_MODE=offline
+
+REPO=/rds/general/user/cc4525/home/ICCV2019_github
+PROCESSED=$EPHEMERAL/cinema_processed/$DS
+RUN_DIR=$EPHEMERAL/cinema_ft_runs/${DS}_${CELL}_s${SEED}
+mkdir -p $RUN_DIR
+
+PRETRAINED=$(python -c "from huggingface_hub import hf_hub_download; print(hf_hub_download('mathpluscode/CineMA','pretrained/cinema.safetensors'))")
+echo "Pretrained backbone: $PRETRAINED"
+
+BINARY_HEAD="data.class_column=binary +data.binary=[NOR,ABNORMAL]"
+CKPT_ARG="model.ckpt_path=$PRETRAINED"
+case $CELL in
+  frac100) EXTRA="$BINARY_HEAD" ;;
+  frac*)   PCT=${CELL#frac}
+           EXTRA="data.proportion=0.$PCT +data.stratify_column=pathology $BINARY_HEAD" ;;
+  5way)    EXTRA="" ;;
+  res5way) EXTRA="model.name=resnet"; CKPT_ARG="" ;;
+  resbin)  EXTRA="model.name=resnet $BINARY_HEAD"; CKPT_ARG="" ;;
+  lodo*)   EXTRA="+data.exclude_pids_csv=$REPO/supervised_cells/${DS}_${CELL}.csv $BINARY_HEAD" ;;
+  ctrl*)   EXTRA="+data.exclude_pids_csv=$REPO/supervised_cells/${DS}_${CELL}_s${SEED}.csv $BINARY_HEAD" ;;
+  *)       echo "Unknown CELL=$CELL"; exit 2 ;;
+esac
+
+if [ "${SMOKE:-0}" = "1" ]; then
+    EXTRA="$EXTRA data.max_n_samples=8 train.n_epochs=2 train.eval_interval=1 train.n_warmup_epochs=0"
+fi
+
+if [ "${EVAL_ONLY:-0}" != "1" ]; then
+    echo "=== Train: ${DS}_clf_train ($CELL seed $SEED) ==="
+    ${DS}_clf_train \
+        data.dir=$PROCESSED \
+        seed=$SEED \
+        $CKPT_ARG \
+        logging.dir=$RUN_DIR \
+        hydra.run.dir=$RUN_DIR/hydra \
+        $EXTRA || exit 1
+fi
+
+echo "=== Eval on held-out cohort ==="
+python $REPO/supervised_ft_eval.py \
+    --run_dir $RUN_DIR \
+    --dataset $DS \
+    --processed_dir $PROCESSED \
+    --out_npz $REPO/supervised_ft_out/${DS}_${CELL}_s${SEED}.npz || exit 1
+
+echo "--- Finished $(date) ---"

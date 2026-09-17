@@ -1,0 +1,47 @@
+#!/bin/bash
+
+# =============================================================================
+# Train the 2-D DINOv2 Q-Former Autoencoder (Phase B, appearance-only).
+# DINOv2 frozen; only the Q-Former + 2-D decoder train, NOR-only, on 224px frames.
+# Multi-layer DINOv2 perceptual loss (layers 5,8,11 span mid=ACDC + deep=M&Ms).
+# See qfae_dino.py / qfae_dino_train.py.
+# =============================================================================
+
+#PBS -N QFAE_Dino
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"; echo "node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+# DINOv2 weights pre-cached offline in $HF_HOME (from the encoder probe).
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+# --- model smoke guard (shapes + grad isolation + [0,1] recon); abort if it fails ---
+echo "=== smoke: qfae_dino.py ==="
+python qfae_dino.py || { echo "SMOKE FAILED — aborting before training"; exit 1; }
+
+# --- full training (batch 16: perceptual back-props through the frozen ViT-B on recon) ---
+echo "=== training ==="
+python qfae_dino_train.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --fit_datasets ACDC MM \
+    --perceptual_layers 5 8 11 \
+    --epochs 150 \
+    --batch_size 16 \
+    --out_dir ./qfae_dino_out
+RC=$?
+
+echo "--- Finished $(date) ---  RC=$RC"
+echo "Model: ./qfae_dino_out/qfae.pt  (next: qfae_dino_eval.pbs)"
+exit $RC

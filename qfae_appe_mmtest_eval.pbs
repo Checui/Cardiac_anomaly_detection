@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# =============================================================================
+# PHASE 1 — held-out re-eval of the 4 APPEARANCE encoder×scorer QFAE checkpoints
+# on the M&Ms TESTING folder (held-out, ~31 NOR) + ACDC-50, in ONE batched job
+# (single queue wait). Mirrors qfae_mmtest_eval.pbs but loops all four sequentially.
+# Existing runs scored M&Ms-Validation (9 NOR) only; this gives the powered numbers.
+# ACDC (50) is re-scored too = built-in reproduction sanity check.
+#
+#   hybrid_a : encoder=dino   scorer=cinema   (qfae_hybrid_eval.py)
+#   hybrid_b : encoder=cinema scorer=dino     (qfae_hybrid_eval.py)  <- best appearance M&Ms
+#   dino     : encoder=dino   scorer=dino     (qfae_dino_eval.py, --perceptual_backbone dino)
+#   dino_mae : encoder=dino   scorer=mae      (qfae_dino_eval.py, --perceptual_backbone mae)
+# =============================================================================
+
+#PBS -N QFAE_AppeMMtest
+#PBS -l walltime=01:30:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"; echo "Node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+MM_TEST="../Dataset_1/Testing"
+CSV="../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+COMMON="--acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training --mm_val_dir ${MM_TEST} \
+        --mm_csv ${CSV} --val_datasets ACDC MM --perceptual_layers 5 8 11 --top_frac 0.2"
+
+RC=0
+
+echo "=== [1/4] hybrid_a  encoder=dino  scorer=cinema  (ACDC sanity 0.8825) ==="
+python qfae_hybrid_eval.py ${COMMON} --encoder dino --scorer cinema --batch_size 2 \
+    --model_path ./qfae_hybrid_a_out/qfae.pt --out_dir ./qfae_hybrid_a_out_mmtest || RC=1
+
+echo "=== [2/4] hybrid_b  encoder=cinema  scorer=dino  (ACDC sanity 0.6625) ==="
+python qfae_hybrid_eval.py ${COMMON} --encoder cinema --scorer dino --batch_size 2 \
+    --model_path ./qfae_hybrid_b_out/qfae.pt --out_dir ./qfae_hybrid_b_out_mmtest || RC=1
+
+echo "=== [3/4] dino  encoder=dino  scorer=dino  (ACDC sanity 0.6425) ==="
+python qfae_dino_eval.py ${COMMON} --perceptual_backbone dino --batch_size 32 \
+    --model_path ./qfae_dino_out/qfae.pt --out_dir ./qfae_dino_out_mmtest || RC=1
+
+echo "=== [4/4] dino_mae  encoder=dino  scorer=mae  (ACDC sanity 0.7975) ==="
+python qfae_dino_eval.py ${COMMON} --perceptual_backbone mae --batch_size 32 \
+    --model_path ./qfae_dino_mae_out/qfae.pt --out_dir ./qfae_dino_mae_out_mmtest || RC=1
+
+echo "--- Finished (rc=$RC) on $(date) ---"
+exit $RC

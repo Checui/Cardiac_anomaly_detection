@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# Eval the paper-faithful DINOv2-QFAE (separate MAE scorer). MUST pass the same
+# --perceptual_backbone mae as training. Chain: qsub -W depend=afterok:<train> ...
+
+#PBS -N QFAE_DinoMAE_eval
+#PBS -l walltime=02:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"; echo "node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+python qfae_dino_eval.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --val_datasets ACDC MM \
+    --perceptual_backbone mae \
+    --perceptual_layers 5 8 11 \
+    --model_path ./qfae_dino_mae_out/qfae.pt \
+    --out_dir ./qfae_dino_mae_out
+RC=$?
+
+echo "--- Finished $(date) ---  RC=$RC"
+echo "Results: ./qfae_dino_mae_out/qfae_dino_results.json"
+exit $RC

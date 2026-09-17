@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# =============================================================================
+# DINOv2 feature-readout sweep (step a of the encoder-swap follow-up).
+# The crude probe (last-layer patch-GAP @224) already crossed the M&Ms gap
+# (patient-Mean M&Ms 0.667). This sweeps layer {2,5,8,11} x token {CLS,GAP,
+# multi-layer GAP-concat} x resolution {224,518} to see if 0.667 is a floor and
+# whether any config recovers ACDC, before committing to a full DINOv2-QFAE.
+# See derisk_dino_sweep.py.
+# =============================================================================
+
+#PBS -N Derisk_DinoSweep
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+# DINOv2 weights pre-cached offline in $HF_HOME (same as the encoder probe). The
+# 518px run re-instantiates the model at img_size=518 (pos-embed interpolated) —
+# no extra download, timm reuses the cached checkpoint.
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+python derisk_dino_sweep.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --resolutions 224 518 \
+    --knn_k 5 \
+    --out_json derisk_out_dino/dino_sweep.json
+RC=$?
+
+echo "--- Finished $(date) ---  RC=$RC"
+echo "Results: derisk_out_dino/dino_sweep.json (BEST M&Ms line at end of stdout)"
+exit $RC

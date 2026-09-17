@@ -1,0 +1,51 @@
+#!/bin/bash
+
+# =============================================================================
+# Cardiac Q-Former Autoencoder (QFAE) with a frozen CineMA prior — TRAINING.
+# Trains only the Q-Former + 3-D decoder (CineMA frozen) to reconstruct healthy
+# (NOR) SAX stacks under a CineMA perceptual loss. See q-former/ (paper + repo),
+# qfae_cinema.py / qfae_perceptual.py / qfae_train.py, and the plan.
+# =============================================================================
+
+#PBS -N QFAE_CineMA
+#PBS -l walltime=12:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+echo "--- Training QFAE (CineMA-prior, NOR-only, perceptual loss) ---"
+
+# batch_size 2: the perceptual loss backprops THROUGH the frozen 125M CineMA (to
+# reach the reconstruction), so activation memory is high — raise to 4 only if the
+# node has headroom. Q-Former + 3-D decoder ~37M trainable; CineMA frozen.
+python qfae_train.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --fit_datasets ACDC MM \
+    --qformer_blocks 2 \
+    --decoder_dim 512 \
+    --decoder_depth 6 \
+    --perceptual_layers 5 8 11 \
+    --epochs 120 \
+    --batch_size 2 \
+    --lr 1e-4 \
+    --warmup_epochs 10 \
+    --out_dir ./qfae_out
+
+echo "--- Finished ---"
+echo "Job finished on $(date)"
+echo "Model: ./qfae_out/qfae.pt   (next: qsub qfae_eval.pbs)"

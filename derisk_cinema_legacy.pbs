@@ -1,0 +1,54 @@
+#!/bin/bash
+
+# =============================================================================
+# LEGACY-preprocessing baseline for the CineMA de-risk probe.
+# Same probe as derisk_cinema.pbs, but --cinema_preproc legacy: the crude
+# single-2-D-slice path (ICCV data_loader, frame resized to 192, depth
+# zero-padded). Purpose: measure whether the faithful canonical-SAX pipeline
+# actually beats this crude baseline. Writes to ./derisk_out_legacy (does NOT
+# touch the faithful ./derisk_out). See MAE_CineMA_feasibility_memo.md.
+# =============================================================================
+
+#PBS -N Derisk_CineMA_legacy
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+echo "--- Running CineMA de-risking experiment (LEGACY preprocessing baseline) ---"
+
+# Plain legacy: single 2-D slice resized to 192, depth zero-padded (--sax_fill
+# zero, the default). No orient/spacing/n4 — that keeps this a dependency-free
+# crude baseline (no orientation_params.csv needed) and isolates the effect of
+# the faithful canonical-SAX pipeline. Everything else matches the faithful run
+# (same datasets, feature_layers, knn_k) so the AUCs are directly comparable.
+python derisk_cinema.py \
+    --cinema_preproc legacy \
+    --sax_fill zero \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --fit_datasets ACDC MM \
+    --val_datasets ACDC MM \
+    --feature_layers all \
+    --batch_size 4 \
+    --knn_k 5 \
+    --out_dir ./derisk_out_legacy
+
+echo "--- Finished ---"
+echo "Job finished on $(date)"
+echo "Results: ./derisk_out_legacy/derisk_results.json"

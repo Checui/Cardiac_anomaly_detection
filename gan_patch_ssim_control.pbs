@@ -1,0 +1,32 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# Metric-matched patch-support controls (gan_patch_ssim_control.py).
+#
+# Fills the two control cells of tab:gan_revert_patch: SSIM on the worst 16x16
+# patch and full-frame L1, unbundling the paper's patch revert (support change)
+# from its metric change (SSIM -> raw error). Pure numpy/skimage post-processing
+# of saved arrays -- flows from job 3740842 (gan_flowmetric_out/flows.npz),
+# per-sample scores/pids from job 3930515 (gan_revert_out/scores.npz). No TF,
+# no GPU, no data loading. Sanity anchor: recomputed full-frame flow-SSIM must
+# reproduce the headline 0.8125 / 0.7310 / 0.699 (asserted per-sample).
+# Output: gan_revert_out/patch_ssim_control.json + stdout table.
+# -----------------------------------------------------------------------------
+
+#PBS -N GAN_PatchSSIM
+#PBS -l walltime=01:00:00
+#PBS -l select=1:ncpus=4:mem=16gb
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+
+python gan_patch_ssim_control.py
+
+echo "Job finished on $(date)"

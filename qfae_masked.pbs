@@ -1,0 +1,80 @@
+#!/bin/bash
+
+# =============================================================================
+# Masked-motion QFAE (MGMAE/MME) — TRAINING with motion-guided input masking.
+#
+# Same dual-stream model as qfae_flow.pbs, but patches are hidden from the frozen
+# CineMA encoder and the flow head must INPAINT the motion it never saw.
+#
+# Why: qfae_cinema.py asserts n_queries == 2304 == the encoder's token count, so the
+# QFAE paper's regulariser (n_queries << n_patches) is absent from this port. With no
+# masking either, the only anti-identity-shortcut pressure is the frozen encoder.
+# Masking restores the missing regulariser — and putting it on the MOTION head targets
+# the one stream that crosses the M&Ms vendor gap (motion 0.716 vs appearance ~0.51).
+#
+# Refs: MGMAE (ICCV 2023, arXiv 2308.10794) motion-guided masking;
+#       MME/M3Video (CVPR 2023) masked motion encoding.
+#
+# Baseline to beat (qfae_flow_out/): motion M&Ms 0.7156, combined 0.7126.
+# Chain the eval so it survives a disconnect:
+#     qsub qfae_masked.pbs
+#     qsub -W depend=afterok:<jobid> qfae_masked_eval.pbs
+# =============================================================================
+
+#PBS -N QFAE_Masked
+#PBS -l walltime=12:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+# MASK/RATIO overridable from the sweep driver, e.g.
+#   qsub -v MASK=random,RATIO=0.75 qfae_masked.pbs
+MASK=${MASK:-motion}
+RATIO=${RATIO:-0.5}
+OUT=${OUT:-./qfae_masked_out_${MASK}_${RATIO}}
+
+echo "--- Training masked-motion QFAE (mask=$MASK ratio=$RATIO -> $OUT) ---"
+
+# --mask motion samples the mask from the GT flow magnitude (needs --flow).
+# --mask_loss_only restricts the flow L1 to masked voxels: the MME objective, so the
+# head is scored on inpainting rather than copying visible motion through.
+python qfae_train.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --fit_datasets ACDC MM \
+    --flow \
+    --lambda_flow 2.0 \
+    --mask "$MASK" \
+    --mask_ratio "$RATIO" \
+    --mask_alpha 1.0 \
+    --mask_loss_only \
+    --qformer_blocks 2 \
+    --decoder_dim 512 \
+    --decoder_depth 6 \
+    --perceptual_layers 5 8 11 \
+    --epochs 120 \
+    --batch_size 2 \
+    --lr 1e-4 \
+    --warmup_epochs 10 \
+    --out_dir "$OUT"
+RC=$?
+
+echo "--- Finished (python rc=$RC) ---"
+echo "Job finished on $(date)"
+echo "Model: $OUT/qfae.pt   (next: MASK=$MASK RATIO=$RATIO OUT=$OUT qsub -v ... qfae_masked_eval.pbs)"
+# Propagate python's exit code so the eval's afterok dependency is meaningful.
+exit $RC

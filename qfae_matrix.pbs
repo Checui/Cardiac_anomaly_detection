@@ -1,0 +1,153 @@
+#!/bin/bash
+
+# =============================================================================
+# ENCODER x SCORER MATRIX (3x3) — motion (flow_SSIM) + reconstruction streams.
+#
+# Encoders {CineMA, DINOv2@224, MAE@224} x scorers {CineMA, DINOv2@224, MAE@224}.
+# The scorer supplies the appearance LOSS that shapes the shared Q-Former, so each
+# cell must be RETRAINED — re-scoring a checkpoint could only move the appearance
+# stream, never flow_SSIM (the motion streams compare predicted vs GT flow directly
+# and never touch the scorer).
+#
+# Everything runs in ONE job: the GPU queue is heavily contended (v1_gpu72 ~346
+# queued vs 96 running), so queue wait dominates wall-clock, not compute. Measured
+# costs: 2-D train 8-22 min, CineMA train ~11 min, eval 3-9 min, and a ~4-7 min
+# data build re-paid per python invocation.
+#
+# Each cell writes its outputs immediately and training is SKIPPED if qfae.pt
+# already exists, so a walltime kill loses only the cell in flight — just resubmit.
+#
+#   qsub qfae_matrix.pbs
+#   # to queue behind the in-flight ablations:
+#   qsub -W depend=afterany:3466890 qfae_matrix.pbs
+#
+# BATCH SIZE / the one confound to know about:
+#   A CineMA scorer must lift each 2-D slice to a depth-16 stack (2304 tokens), and
+#   CineMA's attention over 2304 tokens costs ~4 GB of attention matrices per layer
+#   at batch 32 — infeasible. The whole 2-D block therefore runs at BS=8 so that
+#   every cell in a ROW shares one batch size and the within-row scorer comparison
+#   (the actual question) is clean. Epochs are held at 80, so data passes match the
+#   existing BS=32 diagonal even though step counts differ; those existing runs
+#   (qfae_dino2d_*_out) stay on disk as an external BS check.
+# =============================================================================
+
+#PBS -N QFAE_Matrix
+#PBS -l walltime=08:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+# Pre-flight: the cross-container scorers must pass their shape / frozen-grad /
+# score(x,x)==0 checks before we spend a queue slot on 8 trainings.
+python qfae_perceptual.py || { echo "SCORER SMOKE FAILED — aborting"; exit 1; }
+python qfae_dino.py       || { echo "2-D SMOKE FAILED — aborting"; exit 1; }
+
+RC=0
+CSV="../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+DINO="vit_base_patch14_dinov2.lvd142m"
+MAE="vit_base_patch16_224.mae"
+
+DATA="--acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training --fit_datasets ACDC MM"
+VAL="--acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training --val_datasets ACDC MM"
+TEST_DIR="../Dataset_1/Testing"
+VAL_DIR="../Dataset_1/Validation"
+
+# ---------------------------------------------------------------------------
+# Regression gate (~16 min). Scorer construction moved into qfae_perceptual.make_scorer and the
+# per-depth appearance decomposition into .score_depth, both on the SHARED eval path. Re-score the
+# two existing diagonal checkpoints through the refactored code; they must reproduce, flow_SSIM/mean:
+#     mae224 x mae (BS=32)  ->  ACDC 0.812 / M&Ms-Test 0.714
+#     cinema x cinema       ->  ACDC 0.795 / M&Ms-Test 0.689
+# The MAE one deliberately uses the DEPRECATED --perceptual_backbone flag, so the legacy alias is
+# exercised end-to-end too. qfae_matrix_report.py checks both numerically.
+# ---------------------------------------------------------------------------
+echo "=== regression: re-score existing mae224 diagonal (legacy flags) ==="
+python qfae_dino_eval.py --flow --img_size 224 --top_frac 0.2 --batch_size 32 ${VAL} \
+    --mm_val_dir "${TEST_DIR}" --mm_csv "${CSV}" \
+    --dino_model "${MAE}" --perceptual_backbone dino \
+    --model_path ./qfae_dino2d_mae224_out/qfae.pt \
+    --out_dir ./qfae_dino2d_mae224_out_recheck || RC=1
+
+echo "=== regression: re-score existing cinema diagonal ==="
+python qfae_eval.py --flow --single_pass --perceptual_layers 5 8 11 --top_frac 0.2 --batch_size 4 \
+    ${VAL} --mm_val_dir "${TEST_DIR}" --mm_csv "${CSV}" \
+    --model_path ./qfae_flow_sp_out/qfae.pt \
+    --out_dir ./qfae_flow_sp_out_recheck || RC=1
+
+# ---------------------------------------------------------------------------
+# Row 1 — CineMA encoder (native 3-D depth-16). Flags mirror qfae_flow_sp_train.pbs
+# exactly so only --scorer differs from the existing cinema->cinema cell
+# (qfae_flow_sp_out, already trained + evaluated: do NOT retrain it).
+# ---------------------------------------------------------------------------
+CIN_TRAIN="--flow --single_pass --lambda_flow 2.0 --qformer_blocks 2 --decoder_dim 512 \
+--decoder_depth 6 --perceptual_layers 5 8 11 --epochs 120 --batch_size 2 --lr 1e-4 --warmup_epochs 10"
+CIN_EVAL="--flow --single_pass --perceptual_layers 5 8 11 --top_frac 0.2 --batch_size 4"
+
+run_cinema_cell() {   # $1 = tag, $2 = --scorer spec
+    local OUT="./qfae_mx_cinema_$1_out"
+    if [ -f "${OUT}/qfae.pt" ]; then
+        echo "=== [skip train] cinema x $1 — ${OUT}/qfae.pt exists ==="
+    else
+        echo "=== train  cinema x $1 ==="
+        python qfae_train.py ${CIN_TRAIN} ${DATA} --mm_csv "${CSV}" \
+            --scorer "$2" --out_dir "${OUT}" || { RC=1; return; }
+    fi
+    echo "=== eval   cinema x $1  -> M&Ms-TEST ==="
+    python qfae_eval.py ${CIN_EVAL} ${VAL} --mm_val_dir "${TEST_DIR}" --mm_csv "${CSV}" \
+        --scorer "$2" --model_path "${OUT}/qfae.pt" --out_dir "${OUT}_mmtest" || RC=1
+    echo "=== eval   cinema x $1  -> M&Ms-VAL ==="
+    python qfae_eval.py ${CIN_EVAL} ${VAL} --mm_val_dir "${VAL_DIR}" --mm_csv "${CSV}" \
+        --scorer "$2" --model_path "${OUT}/qfae.pt" --out_dir "${OUT}_mmval" || RC=1
+}
+
+run_cinema_cell dino "${DINO}"
+run_cinema_cell mae  "${MAE}"
+
+# ---------------------------------------------------------------------------
+# Rows 2-3 — 2-D encoders (DINOv2@224, MAE@224), genuinely-2-D per-slice regime.
+# Full 2x3 block at BS=8 (see the batch-size note above). 'coupled' = the encoder
+# scores itself; for the MAE encoder that is literally the same weights as the
+# separate-MAE scorer, so mae224 x mae IS the coupled cell.
+# ---------------------------------------------------------------------------
+D2_TRAIN="--flow --epochs 80 --batch_size 8 --lr 1e-4 --warmup_epochs 8 --lambda_flow 2.0 --img_size 224"
+D2_EVAL="--flow --img_size 224 --top_frac 0.2 --batch_size 8"
+
+run_2d_cell() {   # $1 = encoder tag, $2 = --dino_model, $3 = scorer tag, $4 = --scorer spec
+    local OUT="./qfae_mx_$1_$3_out"
+    if [ -f "${OUT}/qfae.pt" ]; then
+        echo "=== [skip train] $1 x $3 — ${OUT}/qfae.pt exists ==="
+    else
+        echo "=== train  $1 x $3 ==="
+        python qfae_dino_train.py ${D2_TRAIN} ${DATA} --mm_csv "${CSV}" \
+            --dino_model "$2" --scorer "$4" --out_dir "${OUT}" || { RC=1; return; }
+    fi
+    echo "=== eval   $1 x $3  -> M&Ms-TEST ==="
+    python qfae_dino_eval.py ${D2_EVAL} ${VAL} --mm_val_dir "${TEST_DIR}" --mm_csv "${CSV}" \
+        --dino_model "$2" --scorer "$4" --model_path "${OUT}/qfae.pt" \
+        --out_dir "${OUT}_mmtest" || RC=1
+    echo "=== eval   $1 x $3  -> M&Ms-VAL ==="
+    python qfae_dino_eval.py ${D2_EVAL} ${VAL} --mm_val_dir "${VAL_DIR}" --mm_csv "${CSV}" \
+        --dino_model "$2" --scorer "$4" --model_path "${OUT}/qfae.pt" \
+        --out_dir "${OUT}_mmval" || RC=1
+}
+
+run_2d_cell dino224 "${DINO}" cinema cinema
+run_2d_cell dino224 "${DINO}" dino   coupled
+run_2d_cell dino224 "${DINO}" mae    "${MAE}"
+
+run_2d_cell mae224  "${MAE}"  cinema cinema
+run_2d_cell mae224  "${MAE}"  dino   "${DINO}"
+run_2d_cell mae224  "${MAE}"  mae    coupled
+
+echo "--- Finished (rc=$RC) $(date) ---"
+echo "Offline report: python qfae_matrix_report.py"
+exit $RC

@@ -1,0 +1,47 @@
+#!/bin/bash
+
+# =============================================================================
+# CONFIRMATORY (Option A gold-standard) — re-eval the single-pass CineMA + the
+# three 2-D configs on the M&Ms VALIDATION folder (disjoint from Testing), so we
+# can SELECT the recipe on M&Ms-Val and REPORT on M&Ms-Test (no test peeking).
+# All 4 in ONE job. Checkpoints already trained; eval-only.
+# =============================================================================
+
+#PBS -N QFAE_ValEval
+#PBS -l walltime=02:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+VAL="../Dataset_1/Validation"
+CSV="../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+COMMON="--acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training --mm_val_dir ${VAL} --mm_csv ${CSV} --val_datasets ACDC MM"
+RC=0
+
+echo "=== [1/4] CineMA single-pass on M&Ms-Val ==="
+python qfae_eval.py --flow --single_pass ${COMMON} --perceptual_layers 5 8 11 --top_frac 0.2 --batch_size 4 \
+    --model_path ./qfae_flow_sp_out/qfae.pt --out_dir ./qfae_flow_sp_out_mmval || RC=1
+
+for CFG in dino224 dino518 mae224; do
+  case "${CFG}" in
+    dino224) MODEL="vit_base_patch14_dinov2.lvd142m"; SIZE=224; BS=32 ;;
+    dino518) MODEL="vit_base_patch14_dinov2.lvd142m"; SIZE=518; BS=8  ;;
+    mae224)  MODEL="vit_base_patch16_224.mae";        SIZE=224; BS=32 ;;
+  esac
+  echo "=== 2-D ${CFG} on M&Ms-Val ==="
+  python qfae_dino_eval.py --flow --dino_model "${MODEL}" --img_size ${SIZE} --perceptual_backbone dino \
+      ${COMMON} --top_frac 0.2 --batch_size ${BS} \
+      --model_path ./qfae_dino2d_${CFG}_out/qfae.pt --out_dir ./qfae_dino2d_${CFG}_out_mmval || RC=1
+done
+
+echo "--- Finished (rc=$RC) $(date) ---"
+exit $RC

@@ -1,0 +1,65 @@
+#!/bin/bash
+
+# =============================================================================
+# Masked-motion QFAE — EVAL. Scores val stacks (ACDC test + M&Ms val) with the same
+# masking used at training, restricting every motion score to the MASKED voxels, so
+# the anomaly score measures how well the model inpainted motion it could not see.
+#
+# Masks are seeded (--mask_seed) and Monte-Carlo averaged (--mask_repeats): a single
+# random draw would make the score stochastic and the AUC partly mask luck.
+#
+# The number that matters: motion stream on M&Ms vs the 0.7156 baseline (qfae_flow_out/).
+# Run after training, ideally chained:
+#     qsub -W depend=afterok:<train_jobid> -v MASK=motion,RATIO=0.5 qfae_masked_eval.pbs
+# =============================================================================
+
+#PBS -N QFAE_Masked_eval
+#PBS -l walltime=4:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+# Must match the training run (see qfae_masked.pbs).
+MASK=${MASK:-motion}
+RATIO=${RATIO:-0.5}
+OUT=${OUT:-./qfae_masked_out_${MASK}_${RATIO}}
+
+echo "--- Evaluating masked-motion QFAE (mask=$MASK ratio=$RATIO <- $OUT) ---"
+
+python qfae_eval.py \
+    --flow \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --val_datasets ACDC MM \
+    --model_path "$OUT/qfae.pt" \
+    --mask "$MASK" \
+    --mask_ratio "$RATIO" \
+    --mask_alpha 1.0 \
+    --mask_repeats 4 \
+    --mask_seed 1234 \
+    --perceptual_layers 5 8 11 \
+    --top_frac 0.2 \
+    --batch_size 4 \
+    --out_dir "$OUT"
+RC=$?
+
+echo "--- Finished (python rc=$RC) ---"
+echo "Job finished on $(date)"
+echo "Results: $OUT/qfae_results.json"
+echo "Compare: motion stream M&Ms vs 0.7156 (qfae_flow_out/qfae_results.json)"
+exit $RC

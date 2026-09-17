@@ -1,0 +1,51 @@
+#!/bin/bash
+
+# =============================================================================
+# Phase-1 GATE: re-run the faithful frozen-feature probe through the NOR-adapted
+# CineMA encoder (LoRA from adapt_cinema.py) and compare to the frozen baseline.
+# Writes ./derisk_out_adapted (frozen baseline is in ./derisk_out).
+# Gate: M&Ms patient-Mean Mahalanobis AUC rises >= ~+0.05 (from 0.59) without
+# ACDC (0.76) collapsing -> build Phase 2 (reverse distillation).
+# =============================================================================
+
+#PBS -N Derisk_CineMA_adapted_v3
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+echo "--- CineMA de-risk probe, NOR-ADAPTED encoder (faithful preprocessing) ---"
+
+# Identical to derisk_cinema.pbs (faithful) EXCEPT --adapter_path, so the AUCs are
+# directly comparable to ./derisk_out. The adapter is injected into the encoder
+# right after from_pretrained(), so features are extracted from the adapted model.
+python derisk_cinema.py \
+    --cinema_preproc faithful \
+    --adapter_path adapter_out_v3/cinema_lora.pt \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --fit_datasets ACDC MM \
+    --val_datasets ACDC MM \
+    --feature_layers all \
+    --batch_size 4 \
+    --knn_k 5 \
+    --out_dir ./derisk_out_adapted_v3
+
+echo "--- Finished ---"
+echo "Job finished on $(date)"
+echo "Results: ./derisk_out_adapted_v3/derisk_results.json (compare to ./derisk_out)"

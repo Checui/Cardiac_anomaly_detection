@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# =============================================================================
+# Variant B: CineMA ENCODER + DINOv2 SCORER (deep-layer, vendor-robust judge).
+# Tests "does the judge control cross-vendor sensitivity?" — DINOv2 is the only
+# net whose features cross the M&Ms gap (probe 0.704), and here it is DECOUPLED
+# from the encoder, so the identity-shortcut that sank dino->dino cannot apply.
+# Key read: does M&Ms rise above the cinema->cinema baseline of 0.549?
+# --perceptual_slices bounds memory (perceptual back-props through ViT-B per slice).
+# =============================================================================
+
+#PBS -N QFAE_HybridB
+#PBS -l walltime=12:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"; echo "node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+echo "=== smoke: qfae_hybrid.py ==="
+python qfae_hybrid.py || { echo "SMOKE FAILED — aborting"; exit 1; }
+
+echo "=== train Variant B (encoder=cinema, scorer=dino) ==="
+python qfae_hybrid_train.py \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --fit_datasets ACDC MM \
+    --encoder cinema --scorer dino \
+    --perceptual_layers 5 8 11 \
+    --perceptual_slices 6 \
+    --epochs 150 --batch_size 2 \
+    --out_dir ./qfae_hybrid_b_out
+RC=$?
+
+echo "--- Finished $(date) --- RC=$RC"
+exit $RC

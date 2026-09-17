@@ -114,6 +114,7 @@ Both files share the same layer primitives (`conv2d`, `conv_transpose`, `conv2d_
 - `loss_appe`: MSE + gradient loss between reconstructed and input frame.
 - `loss_aux`: L1 loss between predicted flow and GT flow (`GAN_tf`); MSE + gradient loss between predicted ED and GT ED frame (`GAN_tf_rgb`).
 - Default weights: `lw_adv=0.25, lw_appe=1.0, lw_aux=2.0` (passed as kwargs to `train_Unet_naive_with_batch_norm`; exposed as `--lw_adv / --lw_appe / --lw_aux` in `run_model.py`).
+- **Optional SSIM flow loss (`GAN_tf` only, opt-in via `--lw_ssim`, default 0 = off):** adds `lw_ssim × (1 − mean(tf.image.ssim(output_opt, plh_flow_true)))` to `G_loss_total`, aligning training with the Flow-SSIM validation score. The 3-channel per-channel-averaged `tf.image.ssim` matches the skimage `channel_axis=-1` semantics in `utils.compute_flow_ssim_scores` (window differs: TF 11×11 Gaussian vs skimage 7×7 uniform — accepted). `max_val` defaults to the per-batch dynamic range `max−min` over GT+pred under `tf.stop_gradient` (so G can't game the C1/C2 constants by inflating its output range), guarded by `tf.maximum(·, 1e-3)`; `--ssim_max_val <float>` switches to a fixed constant. The existing L1 stays (`--lw_aux`); pure-SSIM ablation = `--lw_aux 0 --lw_ssim X`. When enabled the checkpoint folder gets a `_SSIM` suffix (same pattern as `_REG`); when 0 the SSIM op isn't built (an inert `loss_ssim_disabled` constant keeps the fetch lists uniform) so default runs are unchanged. Logged as `Flow/SSIM_Loss` (per-iter W&B, gated) and a "Flow SSIM (1-SSIM)" series in `charts/Flow_Loss`; the 4-column `train_loss_*.txt` CSV is untouched (resume compatibility). Ignored with a printed note for `--model_type rgb`.
 
 **Anomaly scoring at validation** — several parallel scoring pipelines run every validation epoch:
 
@@ -210,3 +211,45 @@ Datasets are expected one directory level up (`../Dataset_1`, `../Dataset_2`). R
 
 ### TF v1 Compatibility Note
 `run_model.py` and `run_model_rgb.py` mock the `ProgressBar` module and redirect `tensorflow` to `tensorflow.compat.v1`. Any new code in these scripts must remain compatible with TF v1 graph-mode semantics. Always call `tf.compat.v1.reset_default_graph()` before building a new graph.
+
+## CineMA Foundation-Model Anomaly Detection (second strand)
+
+A separate, **PyTorch** line of work (no TensorFlow) evaluating a frozen pretrained cardiac
+foundation model — **CineMA** (ConvMAE cine-CMR model, HuggingFace `mathpluscode/CineMA`) —
+as a normal-only anomaly detector, as an alternative to the GAN above. **Status: concluded.**
+Rationale in `MAE_CineMA_feasibility_memo.md`; full results in `CineMA_anomaly_results.md`.
+
+**Environment (distinct from the GAN's `mres_env`):** conda env **`derisk`** — `torch` +
+editable `cinema` (cloned to `~/CineMA`) + monai / scikit-learn / SimpleITK / **nibabel** /
+opencv. CineMA weights are cached offline in `$EPHEMERAL/hf_cache`; all PBS jobs run with
+`HF_HUB_OFFLINE=1`. **All runs go via `qsub`** (the login node is contended; see the memory).
+
+**Files:**
+- `derisk_cinema.py` — the probe. Extracts frozen CineMA features on NOR-only frames, fits
+  Ledoit-Wolf Mahalanobis + kNN, scores val (NOR vs disease), reports patient-level AUCs.
+  Flags: `--cinema_preproc faithful|legacy`, `--adapter_path <lora.pt>`, `--feature_layers`,
+  `--pca`. **Faithful** (default) = CineMA's canonical SAX pipeline; **legacy** = the old
+  single-2-D-slice feed (honours the orient/spacing/N4 flags). `--adapter_path` injects a
+  LoRA adapter into the encoder right after `from_pretrained()`.
+- `cinema_faithful.py` — CineMA-canonical preprocessing (resample 1 mm → LV-bbox crop 192 →
+  clip 0.95/99.5 → depth-16 stacks), reusing `cinema.data.sitk`. Record loaders
+  `load_{acdc,mm}_records` (ED/ES, for the probe) and `load_{acdc,mm}_records_allframes`
+  (whole cine, for adapter training). `_read_sitk_image` has a **nibabel fallback** for the
+  few M&Ms files with non-orthonormal direction cosines that ITK rejects.
+- `cinema_lora.py` — dependency-free LoRA (peft/loralib not installed): `LoRALinear`,
+  `inject_lora(prefix=...)`, `set_trainable`, `save_adapter` / `apply_adapter`.
+- `adapt_cinema.py` — trains the LoRA adapter NOR-only via CineMA's own MAE loss
+  (`model({"sax":t}, mask_ratio=0.75)`); `--all_frames` uses the whole cine, `--smoke` is a
+  1-step CPU sanity test. Feature pooling (both `derisk_cinema.py` and `cinema_faithful.py`):
+  `feature_forward` returns `(batch, n_patches, 768)` (channel-**last** tokens) — pool over
+  the patch dim (`v.flatten(1,-2).mean(1)`), keeping the 768-d embedding.
+- PBS: `derisk_cinema.pbs` (frozen probe), `derisk_cinema_legacy.pbs`, `adapt_cinema.pbs`
+  (adapter), `derisk_adapted.pbs` (adapted re-measure). Chain train→eval on the scheduler
+  with `qsub -W depend=afterok:<jobid> derisk_adapted.pbs` so it survives a disconnect.
+
+**Result (do not re-litigate without new ideas):** frozen CineMA + faithful preprocessing
+reaches patient-Mean AUC **0.76 on ACDC** (≈ the Flow-SSIM GAN baseline 0.73–0.77) but only
+**0.59 on M&Ms** — a multi-vendor domain gap that is *not* a bug and is closed by **neither**
+feature/PCA tuning **nor** light NOR-only LoRA adaptation (three configs, incl. all-frames
+~13× data: ACDC → 0.79, M&Ms stays ~0.59). Overall the probe (~0.68) does not beat the GAN.
+Closing M&Ms would need supervised/few-shot adaptation (out of the unsupervised regime).

@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# =============================================================================
+# CPU aggregation for the CineMA supervised fine-tune grid: label-efficiency
+# curves, LODO table, and extra metrics (AUPRC / Se@90%Sp / Youden) for all
+# models including the existing GAN / QFAE artifacts.
+#   qsub supervised_ft_analysis.pbs           (or chained by launch_cells.sh)
+# =============================================================================
+
+#PBS -N cf_analysis
+#PBS -l walltime=00:30:00
+#PBS -l select=1:ncpus=4:mem=8gb
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd /rds/general/user/cc4525/home/ICCV2019_github
+echo "Job started $(date)"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+
+python supervised_ft_analysis.py
+RC=$?
+echo "--- Finished (rc=$RC) $(date) ---  outputs in supervised_ft_out/"
+exit $RC

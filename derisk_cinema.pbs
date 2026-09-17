@@ -47,19 +47,31 @@ export HF_HUB_OFFLINE=1        # force offline; fail loudly if the cache is miss
 echo "--- Running CineMA de-risking experiment ---"
 
 # Data paths match submit_job.pbs (datasets one level up from this repo).
-# For an apples-to-apples comparison with the orient+spacing+n4 GAN runs, add:
-#     --orient_normalize --spacing_normalize --n4_bias_correct
-# (--orient_normalize also needs
-#  ../reconstructed_sax_images_training_2023/segmentation/orientation_params.csv,
-#  which is NOT in the git repo — scp it over first, else the flag no-ops.)
+#
+# --cinema_preproc faithful (default): CineMA's OWN canonical SAX pipeline —
+#   resample to 1.0 mm/px -> LV-bbox center-crop to 192 -> clip 0.95/99.5 ->
+#   real depth-16 multi-slice stacks, read straight from the raw ACDC/M&Ms files
+#   (cinema_faithful.py). This reads the frozen features ON-distribution and is
+#   what makes the probe faithful to CineMA. In this mode the unit is a 3-D stack
+#   per (patient, phase); patient scores aggregate as Mean / Max over ED+ES.
+#   The --orient/--spacing/--n4 and --sax_fill flags DO NOT apply here (CineMA
+#   does its own geometry), so no orientation_params.csv is needed.
+#
+# --cinema_preproc legacy: the old single-2-D-slice path via the ICCV
+#   data_loader.py (frame resized to 192, depth zero/replicate-padded). Only for
+#   this path do the orient/spacing/n4 flags matter; to match the GAN runs add:
+#     --cinema_preproc legacy --orient_normalize --spacing_normalize --n4_bias_correct
+#   (--orient_normalize also needs
+#    ../reconstructed_sax_images_training_2023/segmentation/orientation_params.csv,
+#    which is NOT in the git repo — scp it over first, else the flag no-ops.)
 python derisk_cinema.py \
+    --cinema_preproc faithful \
     --acdc_dir ../Dataset_2 \
     --mm_dir ../Dataset_1/Training \
     --mm_val_dir ../Dataset_1/Validation \
     --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
     --fit_datasets ACDC MM \
     --val_datasets ACDC MM \
-    --sax_fill zero \
     --feature_layers all \
     --batch_size 4 \
     --knn_k 5 \

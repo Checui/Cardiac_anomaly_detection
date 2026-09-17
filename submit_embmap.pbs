@@ -1,0 +1,26 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# Per-sample encoder embedding-map visualisation (gan_embedding_map.py):
+# one NOR + one DCM ACDC-test sample through both 20-epoch checkpoints
+# (L1 baseline vs L1+SSIM mix), feature maps h0-h5 side by side + difference.
+# CPU-only, output PNGs land in embedding_maps/.
+# -----------------------------------------------------------------------------
+
+#PBS -N EmbMap_GAN
+#PBS -l walltime=02:00:00
+#PBS -l select=1:ncpus=4:mem=24gb
+#PBS -m a
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate mres_env
+
+python gan_embedding_map.py
+
+echo "Job finished on $(date)"

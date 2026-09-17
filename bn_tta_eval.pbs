@@ -1,0 +1,41 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# Test-time BatchNorm adaptation falsification test (bn_tta_eval.py).
+#
+# Zero-training probe of the "IN in the encoder" proposal: rescore the frozen
+# baseline checkpoint (ACDC_MM_RECON_ES_ED_FLOW_NOR_v2_orient_spacing_added,
+# ep 50) on held-out ACDC-50 + M&Ms-Testing with batch BN statistics
+# (plh_is_training=True) vs the frozen moving averages (control). If the
+# M&Ms flow-SSIM patient-mean AUC (baseline 0.731) does not move, the
+# BN-statistics-mismatch mechanism is falsified for this model.
+# -----------------------------------------------------------------------------
+
+#PBS -N BN_TTA_eval
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+module load CUDA/11.8.0
+conda install -c conda-forge cudatoolkit=11.8.0 cudnn -y
+source activate mres_env
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+python bn_tta_eval.py \
+    --ckpt_dir ./training_saver/ACDC_MM_RECON_ES_ED_FLOW_NOR_v2_orient_spacing_added \
+    --epoch 50 \
+    --acdc_dir ../Dataset_2 \
+    --mm_test_dir ../Dataset_1/Testing \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --orient_params ../reconstructed_sax_images_training_2023/segmentation/orientation_params.csv \
+    --batch_size 16 \
+    --out_dir ./bn_tta_out
+
+echo "Job finished on $(date)"

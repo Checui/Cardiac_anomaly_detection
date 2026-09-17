@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# =============================================================================
+# REGISTRATION-FLOW teacher for the genuinely-2-D QFAE (MAE@224 + DINOv2@224).
+# Same architecture / coupled scoring / hyperparams as the Farneback 2-D models
+# (qfae_dino2d_{mae224,dino224}_out) — ONLY the flow GT target changes from
+# Farneback optical flow to the biomechanics Registration_Net teacher.
+# Clean apples-to-apples: reg-vs-optical-flow. Eval chained separately.
+#   qsub qfae_dino2d_reg_train.pbs
+#   qsub -W depend=afterok:<jobid> qfae_dino2d_reg_eval.pbs
+# =============================================================================
+
+#PBS -N QFAE_RegFlow
+#PBS -l walltime=08:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+python qfae_dino.py || { echo "SMOKE FAILED — aborting"; exit 1; }
+RC=0
+CSV="../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+# coupled scoring (--perceptual_backbone dino), embedding appearance (default), reg-flow teacher
+COMMON="--flow --flow_backend registration --reg_repo ../biomechanics-cardiac-motion-hpc \
+        --perceptual_backbone dino --acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training \
+        --fit_datasets ACDC MM --img_size 224 --batch_size 32 --epochs 80 --lr 1e-4 \
+        --warmup_epochs 8 --lambda_flow 2.0"
+
+echo "=== train MAE@224 REG-flow (coupled) ==="
+python qfae_dino_train.py ${COMMON} --mm_csv "${CSV}" \
+  --dino_model vit_base_patch16_224.mae --out_dir ./qfae_dino2d_mae224_reg_out || RC=1
+
+echo "=== train DINOv2@224 REG-flow (coupled) ==="
+python qfae_dino_train.py ${COMMON} --mm_csv "${CSV}" \
+  --dino_model vit_base_patch14_dinov2.lvd142m --out_dir ./qfae_dino2d_dino224_reg_out || RC=1
+
+echo "--- Finished (rc=$RC) $(date) ---"
+exit $RC

@@ -1,0 +1,26 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# Panels for the thesis qualitative figure (gan_qualitative_fig.py).
+# CPU-only: loads ACDC test through the baseline recipe and runs one forward
+# pass of the frozen checkpoint on two patients' slices. Output:
+# gan_flowmetric_out/qualitative_panels.npz
+# -----------------------------------------------------------------------------
+
+#PBS -N GAN_QualFig
+#PBS -l walltime=01:00:00
+#PBS -l select=1:ncpus=4:mem=32gb
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate mres_env
+
+python gan_qualitative_fig.py
+
+echo "Job finished on $(date)"

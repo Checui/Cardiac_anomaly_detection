@@ -1,0 +1,63 @@
+#!/bin/bash
+
+# =============================================================================
+# Eval for the flow-head ablations (chain: qsub -W depend=afterok:<train> this).
+#  (A) flow-only lambda_appe sweep -> ACDC-50 + M&Ms-TEST (we read flow_SSIM only;
+#      appearance is untrained at lambda_appe=0 and ignored).
+#  (B) pixel-appe models -> ACDC-50 + M&Ms-TEST *and* M&Ms-VAL (val enables the
+#      honest select-on-val / report-on-test fusion-weight check offline).
+# Offline analysis afterwards: python fusion_sweep_2d.py (extend CONFIGS) /
+#      python qfae_report.py --agg_sweep <npz>.
+# =============================================================================
+
+#PBS -N QFAE_FlowAbl_eval
+#PBS -l walltime=03:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+RC=0
+CSV="../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+TEST="../Dataset_1/Testing"
+VAL="../Dataset_1/Validation"
+COMMON="--flow --img_size 224 --perceptual_backbone dino --acdc_dir ../Dataset_2 \
+        --mm_dir ../Dataset_1/Training --val_datasets ACDC MM --top_frac 0.2 --batch_size 32"
+
+# ---- (A) flow-only lambda_appe sweep: M&Ms-TEST + ACDC-50 (embedding appe, read flow only) ----
+for LAM in 0.0 0.25 0.5; do
+  echo "=== eval MAE@224 flow-only lambda_appe=${LAM} on M&Ms-TEST ==="
+  python qfae_dino_eval.py ${COMMON} --dino_model vit_base_patch16_224.mae \
+    --appe_space embedding --mm_val_dir ${TEST} --mm_csv "${CSV}" \
+    --model_path ./qfae_flowonly_la${LAM}_out/qfae.pt \
+    --out_dir ./qfae_flowonly_la${LAM}_out_mmtest || RC=1
+done
+
+# ---- (B) pixel-appe models: TEST + VAL ----
+for ENC in mae224 dino224; do
+  case "${ENC}" in
+    mae224)  MODEL="vit_base_patch16_224.mae" ;;
+    dino224) MODEL="vit_base_patch14_dinov2.lvd142m" ;;
+  esac
+  echo "=== eval ${ENC} pixel-appe on M&Ms-TEST ==="
+  python qfae_dino_eval.py ${COMMON} --dino_model ${MODEL} --appe_space pixel \
+    --mm_val_dir ${TEST} --mm_csv "${CSV}" \
+    --model_path ./qfae_pixelappe_${ENC}_out/qfae.pt \
+    --out_dir ./qfae_pixelappe_${ENC}_out_mmtest || RC=1
+  echo "=== eval ${ENC} pixel-appe on M&Ms-VAL ==="
+  python qfae_dino_eval.py ${COMMON} --dino_model ${MODEL} --appe_space pixel \
+    --mm_val_dir ${VAL} --mm_csv "${CSV}" \
+    --model_path ./qfae_pixelappe_${ENC}_out/qfae.pt \
+    --out_dir ./qfae_pixelappe_${ENC}_out_mmval || RC=1
+done
+
+echo "--- Finished (rc=$RC) $(date) ---"
+exit $RC

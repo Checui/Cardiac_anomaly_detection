@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# =============================================================================
+# Dual-stream QFAE — EVALUATION. Scores val stacks by appearance (perceptual) AND
+# motion (Flow-SSIM / mag-SSIM / flow-L1) + a combined score, reporting per-stream
+# patient AUCs. Run after qfae_flow.pbs (needs ./qfae_flow_out/qfae.pt).
+# THE KEY NUMBER: flow_SSIM M&Ms (vs QFAE-appearance 0.55, GAN Flow-SSIM 0.73-0.77).
+# =============================================================================
+
+#PBS -N QFAE_Flow_eval
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+source activate derisk
+
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+echo "--- Evaluating dual-stream QFAE (appearance + motion) ---"
+
+python qfae_eval.py \
+    --flow \
+    --acdc_dir ../Dataset_2 \
+    --mm_dir ../Dataset_1/Training \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --val_datasets ACDC MM \
+    --model_path ./qfae_flow_out/qfae.pt \
+    --perceptual_layers 5 8 11 \
+    --top_frac 0.2 \
+    --batch_size 4 \
+    --out_dir ./qfae_flow_out
+
+echo "--- Finished ---"
+echo "Job finished on $(date)"
+echo "Results: ./qfae_flow_out/qfae_results.json"

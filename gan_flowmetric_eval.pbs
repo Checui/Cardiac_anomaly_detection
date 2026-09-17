@@ -1,0 +1,43 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# Flow-metric comparison on the baseline GAN (gan_flowmetric_eval.py).
+#
+# Rescoring of the frozen baseline checkpoint
+# (ACDC_MM_RECON_ES_ED_FLOW_NOR_v2_orient_spacing_added, ep 50) on held-out
+# ACDC-50 + M&Ms-Testing (+ M&Ms-Validation for honest selection), with the
+# anomaly score as the only varied factor: flow-SSIM / mag-SSIM / L1 (sanity
+# anchors, must reproduce 0.8125 / 0.7310) vs EPE, Barron angular error, and
+# the scale-free variants already run on the QFAE models.
+# -----------------------------------------------------------------------------
+
+#PBS -N GAN_FlowMetric
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+
+echo "Job started on $(date)"
+echo "Running on node: $(hostname)"
+
+source ~/miniconda/bin/activate
+module load CUDA/11.8.0
+conda install -c conda-forge cudatoolkit=11.8.0 cudnn -y
+source activate mres_env
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+python gan_flowmetric_eval.py \
+    --ckpt_dir ./training_saver/ACDC_MM_RECON_ES_ED_FLOW_NOR_v2_orient_spacing_added \
+    --epoch 50 \
+    --acdc_dir ../Dataset_2 \
+    --mm_test_dir ../Dataset_1/Testing \
+    --mm_val_dir ../Dataset_1/Validation \
+    --mm_csv "../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv" \
+    --orient_params ../reconstructed_sax_images_training_2023/segmentation/orientation_params.csv \
+    --batch_size 16 \
+    --save_flows \
+    --out_dir ./gan_flowmetric_out
+
+echo "Job finished on $(date)"

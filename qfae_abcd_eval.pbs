@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# =============================================================================
+# A/B BATCH eval — held-out ACDC-50 + M&Ms-TESTING, same protocol as every other
+# number in POST_ICCV2019_EXPERIMENTS_SUMMARY.md (patient-Mean AUC per dataset).
+# The architecture of each checkpoint is read back from its own arch config, so
+# no arm-specific model flags are needed here.
+#
+# Every eval now also emits the (C) flow score-way streams — flow_EPE, flow_EPEn,
+# flow_ang, flow_magr — alongside flow_SSIM / mag_SSIM / flow_L1, for free.
+#
+#   qsub -W depend=afterok:<train_jobid> -v GROUP=a qfae_abcd_eval.pbs
+#   qsub -W depend=afterok:<train_jobid> -v GROUP=b qfae_abcd_eval.pbs
+# =============================================================================
+
+#PBS -N QFAE_ABCD_eval
+#PBS -l walltime=06:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -m ea
+#PBS -M cc4525@imperial.ac.uk
+
+cd $PBS_O_WORKDIR
+echo "Job started $(date)  GROUP=${GROUP}"; echo "Node: $(hostname)"
+source ~/miniconda/bin/activate
+source activate derisk
+module load CUDA/11.8.0
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export HF_HOME=${HF_HOME:-$EPHEMERAL/hf_cache}
+export HF_HUB_OFFLINE=1
+
+RC=0
+CSV="../Dataset_1/211230_M&Ms_Dataset_information_diagnosis_opendataset.csv"
+COMMON="--flow --dino_model vit_base_patch16_224.mae --img_size 224 --perceptual_backbone dino \
+        --acdc_dir ../Dataset_2 --mm_dir ../Dataset_1/Training --mm_val_dir ../Dataset_1/Testing \
+        --val_datasets ACDC MM --top_frac 0.2 --batch_size 32"
+
+case "${GROUP}" in
+  a) ARMS="nq8 nq16 nq32 nq64 nq196" ;;
+  b) ARMS="drop02 linattn hardmine dinomaly" ;;
+  *) echo "ERROR: set -v GROUP=a|b"; exit 2 ;;
+esac
+
+for ARM in ${ARMS}; do
+  OUT="./qfae_abcd_${ARM}_out"
+  [ -f "${OUT}/qfae.pt" ] || { echo "SKIP ${ARM}: no checkpoint at ${OUT}/qfae.pt"; RC=1; continue; }
+  echo "=== eval arm ${ARM} on ACDC-50 + M&Ms-TESTING ==="
+  python qfae_dino_eval.py ${COMMON} --mm_csv "${CSV}" \
+      --model_path "${OUT}/qfae.pt" --out_dir "${OUT}_mmtest" || RC=1
+done
+
+echo "--- GROUP=${GROUP} eval finished (rc=$RC) $(date) ---"
+echo "Next (offline): python analyze_abcd.py"
+exit $RC
